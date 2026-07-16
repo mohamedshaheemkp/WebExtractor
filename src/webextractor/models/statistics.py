@@ -1,5 +1,4 @@
-from dataclasses import dataclass, field
-from webextractor.models.asset import AssetType
+from dataclasses import dataclass
 
 
 @dataclass(slots=True)
@@ -7,10 +6,22 @@ class Statistics:
 
     total: int = 0
 
-    downloaded: int = 0
+    html: int = 0
 
-    failed: int = 0
+    css: int = 0
 
-    skipped: int = 0
+    js: int = 0
 
-    by_type: dict[AssetType, int] = field(default_factory=lambda: {t: 0 for t in AssetType})
+    images: int = 0
+
+    fonts: int = 0
+
+    videos: int = 0
+
+    json: int = 0
+
+    svg: int = 0
+
+    wasm: int = 0
+
+    other: int = 0

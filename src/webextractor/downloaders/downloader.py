@@ -1,95 +1,96 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
+from __future__ import annotations
 
-import requests
-from rich.progress import (
-    Progress,
-    SpinnerColumn,
-    BarColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
+import aiofiles
+import aiohttp
 
+from webextractor.config import config
 from webextractor.models.asset import Asset
-from webextractor.models.result import Result
 from webextractor.utils.filesystem import ensure_parent
+from webextractor.utils.logger import logger
 
 
-TIMEOUT = 20
-MAX_WORKERS = 8
+class Downloader:
 
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+    ) -> None:
 
-def download_asset(asset: Asset, output_dir: Path):
+        self.session = session
 
-    destination = asset.local_path
+    async def download(
+        self,
+        asset: Asset,
+    ) -> bool:
 
-    try:
+        if asset.local_path is None:
+            raise ValueError("Asset local_path is not set.")
 
-        response = requests.get(
-            asset.url,
-            timeout=TIMEOUT,
-            headers={
-                "User-Agent":
-                "Mozilla/5.0 WebExtractor"
-            },
-        )
+        ensure_parent(asset.local_path)
 
-        response.raise_for_status()
+        try:
 
-        ensure_parent(destination)
-        with destination.open("wb") as file:
-            file.write(response.content)
+            async with self.session.get(asset.url) as response:
 
-        return True, asset
+                if response.status != 200:
 
-    except Exception:
+                    logger.warning(
+                        "%s -> %s",
+                        response.status,
+                        asset.url,
+                    )
 
-        return False, asset
+                    return False
+                written = 0
 
+                async with aiofiles.open(
+                    asset.local_path,
+                    "wb",
+                ) as file:
 
-def download_assets(
-    assets: list[Asset],
-    output_dir: Path,
-) -> Result:
+                    async for chunk in response.content.iter_chunked(
+                        config.download_chunk_size
+                    ):
 
-    result = Result()
+                        await file.write(chunk)
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("{task.completed}/{task.total}"),
-        TimeElapsedColumn(),
-    ) as progress:
+                        written += len(chunk)
 
-        task = progress.add_task(
-            "Downloading",
-            total=len(assets),
-        )
+                asset.status_code = response.status
+                asset.size = written
+                asset.downloaded = True
 
-        with ThreadPoolExecutor(
-            max_workers=MAX_WORKERS
-        ) as executor:
-
-            futures = [
-                executor.submit(
-                    download_asset,
-                    asset,
-                    output_dir,
+                logger.debug(
+                    "Downloaded : %s",
+                    asset.filename,
                 )
-                for asset in assets
-            ]
 
-            for future in as_completed(futures):
+                if asset.size == 0:
 
-                success, asset = future.result()
+                    logger.warning(
+                        "Empty File : %s",
+                        asset.filename,
+                    )
 
-                if success:
-                    asset.downloaded = True
-                    result.success.append(asset)
-                else:
-                    result.failed.append(asset)
+                    return False
+                    
+                if asset.size <= 0:
 
-                progress.update(task, advance=1)
+                    logger.warning(
+                        "Empty file : %s",
+                        asset.url,
+                    )
 
-    return result
+                    return False
+
+                return True
+
+        except Exception as error:
+
+            logger.error(
+                "%s -> %s",
+                asset.url,
+                error,
+            )
+
+            return False

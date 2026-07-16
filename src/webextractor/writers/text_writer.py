@@ -1,34 +1,38 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 from webextractor.models.asset import Asset
-from webextractor.utils.filesystem import ensure_directory
+from webextractor.utils.filesystem import ensure_parent
 
 
-def save_urls(
+def write_urls(
     assets: list[Asset],
-    destination: Path,
+    output: Path,
 ) -> None:
 
-    text = "\n".join(
-        asset.url
-        for asset in assets
-    )
+    ensure_parent(output / "urls.txt")
 
-    ensure_directory(destination.parent)
-    with destination.open("w", encoding="utf-8") as file:
-        file.write(text)
+    with (output / "urls.txt").open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+
+        for asset in assets:
+            file.write(asset.url + "\n")
 
 
-def save_failed(
+def write_failed(
     failed: list[Asset],
-    destination: Path,
+    output: Path,
 ) -> None:
 
-    text = "\n".join(
-        asset.url
-        for asset in failed
-    )
+    ensure_parent(output / "failed.txt")
 
-    ensure_directory(destination.parent)
-    with destination.open("w", encoding="utf-8") as file:
-        file.write(text)
+    with (output / "failed.txt").open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+
+        for asset in failed:
+            file.write(asset.url + "\n")

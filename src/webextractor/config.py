@@ -18,11 +18,15 @@ class Config:
 
     retries: int = MAX_RETRIES
 
+    workers: int = 8
+
     connections: int = MAX_CONNECTIONS
 
     verify_ssl: bool = True
 
     overwrite: bool = False
+
+    download_chunk_size: int = 16384
 
     user_agent: str = USER_AGENT
 
