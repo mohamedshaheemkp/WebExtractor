@@ -1,0 +1,3 @@
+"""
+WebExtractor package.
+"""

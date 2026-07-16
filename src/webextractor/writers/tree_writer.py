@@ -1,0 +1,3 @@
+"""
+Directory tree writer implementation.
+"""

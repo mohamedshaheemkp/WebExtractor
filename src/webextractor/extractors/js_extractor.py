@@ -1,0 +1,3 @@
+"""
+JavaScript Extractor logic.
+"""

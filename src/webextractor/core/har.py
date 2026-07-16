@@ -1,0 +1,3 @@
+"""
+HAR processing core logic.
+"""

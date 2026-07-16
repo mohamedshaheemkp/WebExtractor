@@ -1,0 +1,8 @@
+playwright
+requests
+beautifulsoup4
+lxml
+rich
+aiohttp
+aiofiles
+tqdm
