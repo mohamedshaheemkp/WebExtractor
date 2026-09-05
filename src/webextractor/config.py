@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 from webextractor.constants import (
     OUTPUT_DIR,
@@ -12,7 +13,7 @@ from webextractor.constants import (
 @dataclass(slots=True)
 class Config:
 
-    output_dir = OUTPUT_DIR
+    output_dir: Path = OUTPUT_DIR
 
     timeout: int = DEFAULT_TIMEOUT
 

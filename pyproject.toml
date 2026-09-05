@@ -21,7 +21,11 @@ dependencies = [
     "playwright",
     "aiohttp",
     "aiofiles",
+    "pydantic",
 ]
+
+[project.scripts]
+webextractor = "webextractor.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

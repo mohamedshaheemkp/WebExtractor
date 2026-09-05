@@ -1,3 +1,0 @@
-"""
-Browser driver wrapper.
-"""

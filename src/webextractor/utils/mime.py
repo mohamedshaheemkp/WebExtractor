@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from webextractor.models.asset import AssetType
+from webextractor.model.asset import AssetType
 
 
 def classify(mime: str, filename: str = "") -> AssetType:

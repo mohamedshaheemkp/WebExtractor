@@ -6,3 +6,4 @@ rich
 aiohttp
 aiofiles
 tqdm
+pydantic

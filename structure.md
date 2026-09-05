@@ -1,28 +1,60 @@
-WebLens/
+src/webextractor/
 │
-├── src/
-│   └── weblens/
-│       │
-│       ├── cli/
-│       ├── config/
-│       ├── core/
-│       ├── downloaders/
-│       ├── parsers/
-│       ├── analyzers/
-│       ├── reporters/
-│       ├── models/
-│       ├── plugins/
-│       ├── utils/
-│       └── __init__.py
+├── cli/
+│   ├── commands/
+│   │   ├── extract.py
+│   │   ├── inspect.py
+│   │   └── rip.py
+│   │
+│   └── main.py
 │
-├── tests/
-├── docs/
-├── samples/
-├── output/
-├── scripts/
+├── capture/
+│   ├── browser.py
+│   ├── crawler.py
+│   ├── dom.py
+│   ├── network.py
+│   ├── screenshot.py
+│   └── states.py
 │
-├── pyproject.toml
-├── README.md
-├── LICENSE
-├── .gitignore
-└── CHANGELOG.md
+├── har/
+│   ├── parser.py
+│   ├── entries.py
+│   └── normalizer.py
+│
+├── analysis/
+│   ├── components.py
+│   ├── framework.py
+│   ├── layout.py
+│   ├── typography.py
+│   ├── tokens.py
+│   ├── assets.py
+│   ├── routes.py
+│   ├── interactions.py
+│   └── accessibility.py
+│
+├── model/
+│   ├── site.py
+│   ├── page.py
+│   ├── component.py
+│   ├── asset.py
+│   ├── token.py
+│   ├── interaction.py
+│   └── route.py
+│
+├── generator/
+│   ├── react.py
+│   ├── nextjs.py
+│   ├── components.py
+│   ├── styles.py
+│   ├── assets.py
+│   └── project.py
+│
+├── verification/
+│   ├── screenshots.py
+│   ├── visual_diff.py
+│   └── report.py
+│
+└── downloader/
+    ├── download.py
+    ├── concurrency.py
+    └── reports.py
