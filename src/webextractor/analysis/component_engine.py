@@ -12,6 +12,8 @@ class ComponentNode:
     role: str | None = None
     text: str = ""
     classes: list[str] = field(default_factory=list)
+    attributes: dict[str, str] = field(default_factory=dict)
+    styles: dict[str, str] = field(default_factory=dict)
     children: list["ComponentNode"] = field(
         default_factory=list
     )
@@ -26,6 +28,8 @@ class ComponentNode:
             "role": self.role,
             "text": self.text,
             "classes": self.classes,
+            "attributes": self.attributes,
+            "styles": self.styles,
             "children": [
                 child.to_dict()
                 for child in self.children
@@ -148,12 +152,22 @@ class ComponentEngine:
                     child_component
                 )
 
+        attributes = dict(node.get("attributes") or {})
+        styles = dict(node.get("styles") or {})
+        for attr_k in ("viewBox", "width", "height", "transform", "preserveAspectRatio", "clipPath", "src", "poster", "href", "target", "alt"):
+            if node.get(attr_k) and attr_k not in attributes:
+                attributes[attr_k] = str(node[attr_k])
+        if element_id and "id" not in attributes:
+            attributes["id"] = element_id
+
         return ComponentNode(
             name=name,
             tag=tag,
             role=role,
             text=text[:500],
             classes=classes,
+            attributes=attributes,
+            styles=styles,
             children=children,
             confidence=confidence,
         )

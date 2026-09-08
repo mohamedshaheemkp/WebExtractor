@@ -31,6 +31,7 @@ class DomToJsxEmitter:
 
     SVG_ATTR_MAPPINGS = {
         "viewbox": "viewBox",
+        "preserveaspectratio": "preserveAspectRatio",
         "stroke-width": "strokeWidth",
         "strokewidth": "strokeWidth",
         "fill-rule": "fillRule",
@@ -41,6 +42,78 @@ class DomToJsxEmitter:
         "strokelinecap": "strokeLinecap",
         "stroke-linejoin": "strokeLinejoin",
         "strokelinejoin": "strokeLinejoin",
+        "stroke-miterlimit": "strokeMiterlimit",
+        "strokemiterlimit": "strokeMiterlimit",
+        "stroke-dasharray": "strokeDasharray",
+        "strokedasharray": "strokeDasharray",
+        "stroke-dashoffset": "strokeDashoffset",
+        "strokedashoffset": "strokeDashoffset",
+        "xmlns:xlink": "xmlnsXlink",
+        "xlink:href": "xlinkHref",
+        "clippath": "clipPath",
+        "clip-path": "clipPath",
+        "srcset": "srcSet",
+        "crossorigin": "crossOrigin",
+        "autoplay": "autoPlay",
+        "playsinline": "playsInline",
+        "novalidate": "noValidate",
+        "tabindex": "tabIndex",
+        "for": "htmlFor",
+        "maxlength": "maxLength",
+        "minlength": "minLength",
+        "readonly": "readOnly",
+        "autocomplete": "autoComplete",
+        "enctype": "encType",
+        "hreflang": "hrefLang",
+    }
+
+    GLOBAL_HTML_ATTRS = {
+        "id", "class", "classname", "style", "title", "dir", "lang", "hidden",
+        "tabindex", "role", "itemprop", "itemscope", "itemtype", "contenteditable",
+        "spellcheck", "draggable", "translate",
+    }
+
+    TAG_SPECIFIC_ATTRS: dict[str, set[str]] = {
+        "img": {"src", "srcset", "alt", "width", "height", "loading", "decoding", "sizes", "crossorigin", "usemap", "ismap"},
+        "a": {"href", "target", "rel", "download", "hreflang", "type", "media", "ping"},
+        "video": {"src", "poster", "autoplay", "controls", "loop", "muted", "preload", "playsinline", "crossorigin", "width", "height"},
+        "audio": {"src", "autoplay", "controls", "loop", "muted", "preload", "crossorigin"},
+        "source": {"src", "srcset", "type", "media", "sizes"},
+        "form": {"action", "method", "enctype", "target", "autocomplete", "novalidate", "name"},
+        "input": {"type", "name", "value", "placeholder", "checked", "disabled", "readonly", "required", "autocomplete", "autofocus", "maxlength", "minlength", "pattern", "min", "max", "step", "multiple", "accept", "src", "alt", "width", "height"},
+        "button": {"type", "name", "value", "disabled", "autofocus", "form", "formaction", "formenctype", "formmethod", "formnovalidate", "formtarget"},
+        "textarea": {"name", "rows", "cols", "placeholder", "disabled", "readonly", "required", "maxlength", "minlength", "autocomplete", "autofocus", "wrap"},
+        "select": {"name", "multiple", "size", "disabled", "required", "autofocus", "form"},
+        "option": {"value", "selected", "disabled", "label"},
+        "iframe": {"src", "srcdoc", "name", "width", "height", "sandbox", "allow", "allowfullscreen", "loading"},
+        "meta": {"name", "content", "charset", "httpequiv", "property"},
+        "link": {"href", "rel", "as", "type", "media", "crossorigin", "hreflang"},
+    }
+
+    SVG_TAGS = {
+        "svg", "path", "circle", "rect", "polygon", "polyline", "line",
+        "ellipse", "g", "defs", "clippath", "mask", "pattern", "use",
+        "text", "tspan", "textpath", "lineargradient", "radialgradient",
+        "stop", "foreignobject",
+    }
+
+    SVG_STANDARD_ATTRS = {
+        "viewbox", "xmlns", "fill", "stroke", "d", "width", "height", "transform",
+        "opacity", "color", "stroke-width", "strokewidth", "stroke-linecap",
+        "strokelinecap", "stroke-linejoin", "strokelinejoin", "stroke-miterlimit",
+        "strokemiterlimit", "stroke-dasharray", "strokedasharray", "stroke-dashoffset",
+        "strokedashoffset", "fill-rule", "fillrule", "clip-rule", "cliprule",
+        "clip-path", "clippath", "mask", "filter", "id", "class", "classname", "style",
+        "cx", "cy", "r", "rx", "ry", "x", "y", "x1", "y1", "x2", "y2", "points",
+        "offset", "stop-color", "stopcolor", "stop-opacity", "stopopacity",
+        "preserveaspectratio", "href", "xlink:href", "xmlns:xlink", "gradientunits",
+        "gradienttransform", "patternunits", "patterntransform", "spreadmethod",
+        "text-anchor", "textanchor", "dominant-baseline", "dominantbaseline",
+        "font-size", "fontsize", "font-family", "fontfamily", "font-weight",
+        "fontweight", "font-style", "fontstyle", "letter-spacing", "letterspacing",
+        "word-spacing", "wordspacing", "dx", "dy", "rotate", "textlength",
+        "lengthadjust", "target", "download", "rel", "type", "media",
+        "focusable", "tabindex", "role",
     }
 
     COMPONENT_KEYWORDS: dict[str, list[str]] = {
@@ -81,10 +154,16 @@ class DomToJsxEmitter:
         keywords = self.COMPONENT_KEYWORDS.get(name, [name.lower()])
         scored_candidates: list[tuple[int, int, int, dict[str, Any]]] = []
 
+        def _get_node_text(node: dict[str, Any]) -> str:
+            collected = [node.get("text") or ""]
+            for child in node.get("children", []):
+                collected.append(_get_node_text(child))
+            return " ".join(filter(None, collected)).lower()
+
         def _score_tree(n: dict[str, Any], depth: int):
             tag = (n.get("tag") or "").lower()
-            txt = (n.get("text") or "").lower()
-            classes = n.get("classes", [])
+            classes = [str(c).lower() for c in n.get("classes", [])]
+            node_id = str(n.get("id") or "").lower()
 
             # Never match root body as a sub-component
             if tag == "body" or depth == 0:
@@ -95,7 +174,8 @@ class DomToJsxEmitter:
             is_semantic_section = tag in ("header", "nav", "section", "footer", "main", "article")
             is_container_div = (tag == "div" and (any(c.endswith("-container") for c in classes) or depth <= 4))
 
-            if (is_semantic_section or is_container_div) and txt:
+            if is_semantic_section or is_container_div:
+                txt = _get_node_text(n)
                 score = 0
                 for kw in keywords:
                     if kw in txt:
@@ -104,6 +184,9 @@ class DomToJsxEmitter:
                 n_name = (n.get("name") or "").lower()
                 if n_name == name.lower():
                     score += 60
+
+                if name.lower() in classes or name.lower() == node_id:
+                    score += 50
 
                 if tag in ("header", "nav") and "Header" in name:
                     score += 50
@@ -167,19 +250,84 @@ class DomToJsxEmitter:
 
         id_attr = f' id="{root_id}"' if (is_root and root_id) else ""
 
+        # Collect and normalize element attributes
+        node_attrs = dict(node.get("attributes") or {})
+        if tag == "foreignObject":
+            if "width" not in node_attrs:
+                node_attrs["width"] = "100%"
+            if "height" not in node_attrs:
+                node_attrs["height"] = "100%"
+
+        other_attrs_list: list[str] = []
+        style_jsx = ""
+
+        for ak, av in node_attrs.items():
+            if av is None:
+                continue
+            av_str = str(av).strip()
+            if not av_str and av_str != "0":
+                continue
+            ak_lower = ak.lower()
+            if ak_lower in ("class", "classname"):
+                continue
+            if ak_lower == "id" and is_root and root_id:
+                continue
+            if ak_lower == "style":
+                style_jsx = self._parse_style_attribute(av_str)
+                continue
+            if ak_lower == "src" and tag in ("img", "video"):
+                continue
+            if ak_lower.startswith("on") or ak_lower.startswith("javascript:"):
+                continue
+
+            if tag == "a" and ak_lower == "href":
+                clean_href = av_str.strip()
+                if clean_href.startswith("./#"):
+                    av_str = clean_href[2:]
+                elif clean_href.startswith("./"):
+                    av_str = "/" + clean_href[2:]
+                elif clean_href.startswith(".#"):
+                    av_str = clean_href[1:]
+
+            tag_lower = tag.lower()
+            if tag_lower in self.SVG_TAGS:
+                if ak_lower in self.SVG_STANDARD_ATTRS or ak_lower.startswith("data-") or ak_lower.startswith("aria-"):
+                    jsx_ak = self.SVG_ATTR_MAPPINGS.get(ak_lower, ak)
+                else:
+                    clean_key = ak_lower.lstrip("_")
+                    jsx_ak = f"data-{clean_key}"
+            elif ak_lower.startswith("data-") or ak_lower.startswith("aria-"):
+                jsx_ak = ak
+            elif ak_lower in self.GLOBAL_HTML_ATTRS or ak_lower in self.TAG_SPECIFIC_ATTRS.get(tag_lower, set()):
+                jsx_ak = self.SVG_ATTR_MAPPINGS.get(ak_lower, ak)
+            else:
+                clean_key = ak_lower.lstrip("_")
+                jsx_ak = f"data-{clean_key}"
+
+            clean_val = html.escape(av_str, quote=True)
+            if jsx_ak == "tabIndex" or (jsx_ak in ("colSpan", "rowSpan", "maxLength", "minLength", "start", "rows", "cols") and av_str.lstrip("-").isdigit()):
+                other_attrs_list.append(f"{jsx_ak}={{{int(av_str)}}}")
+            else:
+                other_attrs_list.append(f'{jsx_ak}="{clean_val}"')
+
+        other_attrs_str = (" " + " ".join(other_attrs_list)) if other_attrs_list else ""
+        tag_attrs = f"{cls_attr}{id_attr}{other_attrs_str}{style_jsx}"
+
         # Asset resolution for media tags
         if tag == "img":
             src = self._resolve_image_src(node)
             src_attr = f' src="{src}"' if src else ""
-            return f"{indent}<img{cls_attr}{id_attr}{src_attr} alt=\"\" />\n"
+            has_alt = any(k.lower() == "alt" for k in node_attrs)
+            alt_attr = "" if has_alt else ' alt=""'
+            return f"{indent}<img{tag_attrs}{src_attr}{alt_attr} />\n"
 
         if tag == "video":
             src = self._resolve_video_src(node)
             src_attr = f' src="{src}"' if src else ""
-            return f"{indent}<video{cls_attr}{id_attr}{src_attr} autoPlay muted loop playsInline />\n"
+            return f"{indent}<video{tag_attrs}{src_attr} autoPlay muted loop playsInline />\n"
 
         if tag in self.SELF_CLOSING_TAGS:
-            return f"{indent}<{tag}{cls_attr}{id_attr} />\n"
+            return f"{indent}<{tag}{tag_attrs} />\n"
 
         txt = (node.get("text") or "").strip()
         valid_children = [
@@ -189,28 +337,57 @@ class DomToJsxEmitter:
 
         if not valid_children:
             if txt:
+                if re.match(r"^\d{2}:\d{2}:\d{2}$", txt):
+                    return f'{indent}<{tag}{tag_attrs}><LiveClock initialTime="{txt}" /></{tag}>\n'
                 esc_txt = self._escape_jsx_text(txt)
-                return f"{indent}<{tag}{cls_attr}{id_attr}>{esc_txt}</{tag}>\n"
+                return f"{indent}<{tag}{tag_attrs}>{esc_txt}</{tag}>\n"
             else:
-                return f"{indent}<{tag}{cls_attr}{id_attr} />\n"
+                return f"{indent}<{tag}{tag_attrs} />\n"
 
         # If children have no text, but this node does, emit text directly
         has_child_text = any(self._has_descendant_text(c) for c in valid_children)
         if not has_child_text and txt:
-            esc_txt = self._escape_jsx_text(txt)
-            inner = f"{indent}  {esc_txt}\n"
+            if re.match(r"^\d{2}:\d{2}:\d{2}$", txt):
+                inner = f'{indent}  <LiveClock initialTime="{txt}" />\n'
+            else:
+                esc_txt = self._escape_jsx_text(txt)
+                inner = f"{indent}  {esc_txt}\n"
             for ch in valid_children:
                 inner += self.emit_jsx(ch, depth + 1, is_root=False)
-            return f"{indent}<{tag}{cls_attr}{id_attr}>\n{inner}{indent}</{tag}>\n"
+            return f"{indent}<{tag}{tag_attrs}>\n{inner}{indent}</{tag}>\n"
 
         inner = ""
         for ch in valid_children:
             inner += self.emit_jsx(ch, depth + 1, is_root=False)
 
         if not inner.strip():
-            return f"{indent}<{tag}{cls_attr}{id_attr} />\n"
+            return f"{indent}<{tag}{tag_attrs} />\n"
 
-        return f"{indent}<{tag}{cls_attr}{id_attr}>\n{inner}{indent}</{tag}>\n"
+        return f"{indent}<{tag}{tag_attrs}>\n{inner}{indent}</{tag}>\n"
+
+    def _parse_style_attribute(self, style_str: str) -> str:
+        """Parses an inline CSS style string into a valid React style={{ ... }} attribute."""
+        if not style_str or not style_str.strip():
+            return ""
+        entries: list[str] = []
+        for part in style_str.split(";"):
+            part = part.strip()
+            if not part or ":" not in part:
+                continue
+            k, v = part.split(":", 1)
+            k = k.strip()
+            v = v.strip().replace('"', '\\"')
+            if not k or not v:
+                continue
+            if k.startswith("--"):
+                entries.append(f'"{k}": "{v}"')
+            else:
+                parts = k.split("-")
+                camel = parts[0] + "".join(p.capitalize() for p in parts[1:])
+                entries.append(f'{camel}: "{v}"')
+        if not entries:
+            return ""
+        return " style={({ " + ", ".join(entries) + " } as React.CSSProperties)}"
 
     def extract_projects(self) -> list[dict[str, Any]]:
         """

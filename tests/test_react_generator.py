@@ -365,7 +365,329 @@ class TestReactProjectGenerator(unittest.TestCase):
         self.assertNotIn("placeholder", hero_code.lower())
         self.assertNotIn("/images/project-placeholder", hero_code)
 
+    def test_svg_viewbox_and_foreignobject_dimensions(self):
+        """Test that SVG viewBox, foreignObject width/height, and inline styles are preserved in JSX."""
+        generator = ReactProjectGenerator(
+            site_ir={
+                "metadata": {"title": "SVG Test Site"},
+                "pages": [{"name": "Home", "components": ["Hero"]}],
+                "components": {
+                    "tag": "body",
+                    "children": [
+                        {
+                            "tag": "section",
+                            "classes": ["hero", "framer-1pf3p1p"],
+                            "children": [
+                                {
+                                    "tag": "svg",
+                                    "classes": ["framer-v9260z"],
+                                    "attributes": {"viewBox": "0 0 2520 318"},
+                                    "children": [
+                                        {
+                                            "tag": "foreignobject",
+                                            "classes": ["framer-fit-text"],
+                                            "attributes": {
+                                                "width": "100%",
+                                                "height": "100%",
+                                                "transform": "scale(1)",
+                                                "style": "overflow:visible;transform-origin:center center",
+                                            },
+                                            "children": [
+                                                {
+                                                    "tag": "h1",
+                                                    "classes": ["framer-text"],
+                                                    "text": "MHD SHM KP",
+                                                    "attributes": {
+                                                        "style": "--framer-font-size:397.38px; --framer-letter-spacing:-3px; --framer-line-height:80%",
+                                                    },
+                                                    "children": [],
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            output_dir=self.output_dir,
+        )
+        generator.generate()
+
+        hero_code = (self.output_dir / "components/Hero.tsx").read_text(encoding="utf-8")
+        self.assertIn('viewBox="0 0 2520 318"', hero_code)
+        self.assertIn('width="100%"', hero_code)
+        self.assertIn('height="100%"', hero_code)
+        self.assertIn('overflow: "visible"', hero_code)
+        self.assertIn('"--framer-font-size": "397.38px"', hero_code)
+        self.assertIn('"--framer-letter-spacing": "-3px"', hero_code)
+
+    def test_foreignobject_defaults_to_100_percent(self):
+        """Test that foreignObject without explicit width/height defaults to 100% to prevent 0x0 browser collapse."""
+        from webextractor.generator.dom_emitter import DomToJsxEmitter
+        emitter = DomToJsxEmitter()
+        node = {
+            "tag": "foreignobject",
+            "classes": ["framer-fit-text"],
+            "attributes": {},
+            "children": [{"tag": "h1", "text": "Heading", "children": []}],
+        }
+        jsx = emitter.emit_jsx(node, depth=0)
+        self.assertIn('width="100%"', jsx)
+        self.assertIn('height="100%"', jsx)
+
+    def test_source_css_and_preset_extraction(self):
+        """Test that extract_relevant_css extracts referenced classes and presets without capturing unused classes."""
+        from webextractor.analysis.source_css import extract_relevant_css
+        sample_html = """
+        <html>
+        <head>
+          <style>
+            @font-face { font-family: "Clash Display"; src: url("clash.woff2"); }
+            @font-face { font-family: "UnusedFont"; src: url("unused.woff2"); }
+            .framer-1adz1xm { display: flex; flex-flow: row; padding: 0 110px; }
+            .framer-styles-preset-vsc6z h3 { font-size: 90px; font-weight: 600; }
+            .completely-unused-class { color: red; }
+            @media (max-width: 768px) {
+              .framer-1adz1xm { flex-direction: column; padding: 0 20px; }
+              .unused-responsive { margin: 0; }
+            }
+          </style>
+        </head>
+        <body></body>
+        </html>
+        """
+        referenced = {"framer-1adz1xm", "framer-styles-preset-vsc6z"}
+        extracted = extract_relevant_css(sample_html, referenced, ["Clash Display"])
+
+        # Font faces
+        self.assertEqual(len(extracted["font_faces"]), 1)
+        self.assertIn("Clash Display", extracted["font_faces"][0])
+        self.assertNotIn("UnusedFont", extracted["font_faces"][0])
+
+        # Class rules
+        class_css = "\n".join(extracted["class_rules"])
+        self.assertIn(".framer-1adz1xm", class_css)
+        self.assertIn(".framer-styles-preset-vsc6z h3", class_css)
+        self.assertNotIn(".completely-unused-class", class_css)
+
+        # Media rules
+        media_css = "\n".join(extracted["media_rules"])
+        self.assertIn(".framer-1adz1xm", media_css)
+        self.assertIn("flex-direction: column", media_css)
+        self.assertNotIn(".unused-responsive", media_css)
+
+    def test_globals_css_emits_extracted_rules(self):
+        """Test that project generator emits extracted font-faces, element classes, and responsive rules to globals.css."""
+        generator = ReactProjectGenerator(
+            site_ir={
+                "metadata": {"title": "CSS Test"},
+                "pages": [{"name": "Home", "components": ["Hero"]}],
+                "component_styles": {
+                    "source_rules": {
+                        "font_faces": ['@font-face { font-family: "Clash Display"; src: url("clash.woff2"); }'],
+                        "class_rules": [".framer-styles-preset-vsc6z h3 {\n  font-size: 90px;\n}"],
+                        "media_rules": ["@media (max-width: 768px) {\n  .framer-1adz1xm {\n    flex-direction: column;\n  }\n}"],
+                    }
+                },
+            },
+            output_dir=self.output_dir,
+        )
+        generator.generate()
+
+        globals_css = (self.output_dir / "app/globals.css").read_text(encoding="utf-8")
+        self.assertIn('@font-face { font-family: "Clash Display"', globals_css)
+        self.assertIn(".framer-styles-preset-vsc6z h3 {", globals_css)
+        self.assertIn("font-size: 90px;", globals_css)
+        self.assertIn("@media (max-width: 768px)", globals_css)
+        self.assertIn(".framer-1adz1xm", globals_css)
+
+    def test_balanced_css_extraction_with_nested_at_rules(self):
+        """Test that nested at-rules like @supports or @keyframes do not leave stray braces in subsequent selectors."""
+        from webextractor.analysis.source_css import extract_relevant_css
+
+        sample_html = """
+        <html>
+        <head>
+          <style>
+            p.framer-text[data-text-fill] { display: inline-block; }
+            @supports (corner-shape:superellipse(2)) {
+              :root { --one-if-corner-shape-supported: 1; }
+            }
+            .framer-cursor-none, .framer-cursor-none * {
+              cursor: none !important;
+            }
+            @keyframes spin {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+            }
+            .framer-spin { animation: spin 1s infinite; }
+          </style>
+        </head>
+        <body></body>
+        </html>
+        """
+        referenced = {"framer-cursor-none", "framer-spin"}
+        extracted = extract_relevant_css(sample_html, referenced)
+
+        class_rules = extracted["class_rules"]
+        self.assertEqual(len(class_rules), 2)
+
+        for rule in class_rules:
+            # Rule must not have stray closing braces at start of selector
+            self.assertFalse(rule.startswith("}"))
+            self.assertFalse(rule.startswith("{"))
+            # Braces inside rule must be strictly balanced
+            self.assertEqual(rule.count("{"), rule.count("}"))
+
+        # Verify specifically that framer-cursor-none selector is clean
+        cursor_rule = next(r for r in class_rules if "framer-cursor-none" in r)
+        self.assertTrue(cursor_rule.startswith(".framer-cursor-none"))
+        self.assertNotIn("}.framer-cursor-none", cursor_rule)
+
+        # Verify through full project generator
+        generator = ReactProjectGenerator(
+            site_ir={
+                "metadata": {"title": "CSS Balance Test"},
+                "pages": [{"name": "Home", "components": ["Hero"]}],
+                "component_styles": {
+                    "source_rules": extracted
+                },
+            },
+            output_dir=self.output_dir,
+        )
+        generator.generate()
+
+        globals_css = (self.output_dir / "app/globals.css").read_text(encoding="utf-8")
+        self.assertEqual(globals_css.count("{"), globals_css.count("}"))
+        self.assertNotIn("}.framer-cursor-none", globals_css)
+        self.assertIn(".framer-cursor-none", globals_css)
+
+    def test_animation_extraction_from_html_scripts(self):
+        """Test that AnimationExtractor correctly extracts appear animations, spring physics, and cursor attributes."""
+        from webextractor.analysis.animations import AnimationExtractor
+
+        sample_html = """
+        <html>
+        <head>
+          <script>
+          {
+            "v9260z": {
+              "default": {
+                "initial": { "opacity": 0.001, "y": -400 },
+                "animate": {
+                  "opacity": 1,
+                  "y": 0,
+                  "transition": { "damping": 40, "stiffness": 200, "delay": 0.2, "type": "spring" }
+                }
+              }
+            }
+          }
+          </script>
+        </head>
+        <body data-framer-cursor="custom-cursor">
+          <div data-framer-appear-id="v9260z">Title</div>
+        </body>
+        </html>
+        """
+        extracted = AnimationExtractor.extract_animations(sample_html)
+        self.assertIn("v9260z", extracted["appear_animations"])
+        anim = extracted["appear_animations"]["v9260z"]
+        self.assertEqual(anim["initial"]["y"], -400)
+        self.assertEqual(anim["animate"]["y"], 0)
+        self.assertEqual(anim["transition"]["stiffness"], 200)
+        self.assertTrue(extracted["has_cursor"])
+
+    def test_video_sources_and_poster_extraction(self):
+        """Test that AssetAnalyzer extracts video sources and poster images."""
+        from webextractor.analysis.assets import AssetAnalyzer
+
+        sample_html = """
+        <html>
+        <body>
+          <video poster="https://example.com/poster.jpg">
+            <source src="https://example.com/video.mp4" type="video/mp4">
+            <source src="https://example.com/video.webm" type="video/webm">
+          </video>
+        </body>
+        </html>
+        """
+        analyzer = AssetAnalyzer()
+        extracted = analyzer.analyze(sample_html, base_url="https://example.com")
+        self.assertIn("https://example.com/video.mp4", extracted["videos"])
+        self.assertIn("https://example.com/video.webm", extracted["videos"])
+        self.assertIn("https://example.com/poster.jpg", extracted["images"])
+
+    def test_multi_page_route_generation(self):
+        """Test that project generator writes real pages for all discovered routes."""
+        generator = ReactProjectGenerator(
+            site_ir={
+                "metadata": {"title": "Multi Route Site"},
+                "routes": ["/", "/contact", "/work/agriai", "/work/ms-portfolio"],
+                "pages": [{"name": "Home", "components": ["Hero"]}],
+                "data": {
+                    "projects": [
+                        {
+                            "slug": "agriai",
+                            "title": "AgriAi",
+                            "category": "AI / Machine Learning",
+                            "description": "Smart farming interface.",
+                        },
+                        {
+                            "slug": "ms-portfolio",
+                            "title": "MS Portfolio",
+                            "category": "Creative Development",
+                            "description": "Personal creative portfolio.",
+                        }
+                    ]
+                },
+            },
+            output_dir=self.output_dir,
+        )
+        generator.generate()
+
+        self.assertTrue((self.output_dir / "app/page.tsx").exists())
+        self.assertTrue((self.output_dir / "app/contact/page.tsx").exists())
+        self.assertTrue((self.output_dir / "app/work/agriai/page.tsx").exists())
+        self.assertTrue((self.output_dir / "app/work/ms-portfolio/page.tsx").exists())
+        self.assertTrue((self.output_dir / "app/work/[slug]/page.tsx").exists())
+
+        agriai_page = (self.output_dir / "app/work/agriai/page.tsx").read_text(encoding="utf-8")
+        self.assertIn("AgriAi", agriai_page)
+        self.assertIn("AI / Machine Learning", agriai_page)
+
+    def test_layout_runtime_components_and_motion(self):
+        """Test that layout.tsx includes FramerAppearRuntime with extracted animations."""
+        generator = ReactProjectGenerator(
+            site_ir={
+                "metadata": {"title": "Motion Site"},
+                "pages": [{"name": "Home", "components": ["Hero"]}],
+                "animations": {
+                    "appear_animations": {
+                        "v9260z": {
+                            "initial": {"opacity": 0.001, "y": -400},
+                            "animate": {"opacity": 1, "y": 0},
+                        }
+                    },
+                    "has_cursor": True,
+                },
+            },
+            output_dir=self.output_dir,
+        )
+        generator.generate()
+
+        layout_code = (self.output_dir / "app/layout.tsx").read_text(encoding="utf-8")
+        self.assertIn("FramerAppearRuntime", layout_code)
+        self.assertIn("CursorFollower", layout_code)
+        self.assertIn("v9260z", layout_code)
+
+        self.assertTrue((self.output_dir / "components/FramerAppearRuntime.tsx").exists())
+        self.assertTrue((self.output_dir / "components/CursorFollower.tsx").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
 

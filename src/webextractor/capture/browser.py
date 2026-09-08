@@ -167,6 +167,17 @@ class BrowserCapture:
                             height: Math.round(rect.height)
                         },
 
+                        attributes: (() => {
+                            const attrs = {};
+                            if (element.attributes) {
+                                for (let i = 0; i < element.attributes.length; i++) {
+                                    const a = element.attributes[i];
+                                    attrs[a.name] = a.value;
+                                }
+                            }
+                            return attrs;
+                        })(),
+
                         src: element.src || element.getAttribute("src") || null,
                         poster: element.getAttribute("poster") || null,
 

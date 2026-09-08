@@ -36,9 +36,7 @@ class AssetAnalyzer:
                 )
 
         for tag in soup.find_all("video"):
-
             src = tag.get("src")
-
             if src:
                 videos.append(
                     urljoin(
@@ -46,6 +44,25 @@ class AssetAnalyzer:
                         src,
                     )
                 )
+
+            poster = tag.get("poster")
+            if poster:
+                images.append(
+                    urljoin(
+                        base_url,
+                        poster,
+                    )
+                )
+
+            for source in tag.find_all("source"):
+                s_src = source.get("src")
+                if s_src:
+                    videos.append(
+                        urljoin(
+                            base_url,
+                            s_src,
+                        )
+                    )
 
         for tag in soup.find_all("link"):
 

@@ -182,12 +182,31 @@ export default nextConfig;
             .get("title")
             or "Reconstructed Website"
         )
+        animations = self.ir.get("animations", {})
+        appear_animations = animations.get("appear_animations", {})
+        has_cursor = animations.get("has_cursor", False)
+
+        layout_imports = [
+            'import "../styles/tokens.css";',
+            'import "./globals.css";',
+            'import FramerAppearRuntime from "../components/FramerAppearRuntime";',
+        ]
+        layout_elements = [
+            "        {children}",
+            f"        <FramerAppearRuntime animations={{{json.dumps(appear_animations)}}} />",
+        ]
+
+        if has_cursor:
+            layout_imports.append('import CursorFollower from "../components/CursorFollower";')
+            layout_elements.append("        <CursorFollower />")
+
+        imports_str = "\n".join(layout_imports)
+        elements_str = "\n".join(layout_elements)
 
         self._text(
             "app/layout.tsx",
             f"""\
-import "../styles/tokens.css";
-import "./globals.css";
+{imports_str}
 
 export const metadata = {{
   title: {json.dumps(title)},
@@ -201,7 +220,7 @@ export default function RootLayout({{
   return (
     <html lang="en">
       <body>
-        {{children}}
+{elements_str}
       </body>
     </html>
   );
@@ -517,7 +536,17 @@ export default function RootLayout({{
         if mobile_media_rules:
             media_block += "\n@media (max-width: 768px) {\n" + "\n\n".join(mobile_media_rules) + "\n}\n"
 
-        css_content = """\
+        # Source-extracted rules (font-faces, relevant classes, media rules)
+        source_rules = self.ir.get("component_styles", {}).get("source_rules", {})
+        font_faces = source_rules.get("font_faces", [])
+        class_rules = source_rules.get("class_rules", [])
+        source_media_rules = source_rules.get("media_rules", [])
+
+        font_face_block = ("\n\n".join(font_faces) + "\n\n") if font_faces else ""
+        source_class_block = ("\n\n/* Source Extracted Element Styles */\n" + "\n\n".join(class_rules)) if class_rules else ""
+        source_media_block = ("\n\n/* Source Extracted Responsive Rules */\n" + "\n\n".join(source_media_rules)) if source_media_rules else ""
+
+        css_content = font_face_block + """\
 * {
   box-sizing: border-box;
 }
@@ -558,7 +587,7 @@ code, pre, kbd {
 }
 
 /* Component Classes */
-""" + "\n\n".join(style_rules) + media_block
+""" + "\n\n".join(style_rules) + source_class_block + media_block + source_media_block
 
         self._text(
             "app/globals.css",
@@ -626,6 +655,8 @@ code, pre, kbd {
             if name not in page_comp_names:
                 self._write_reusable_component(name)
 
+        # 3. Interactive Runtime Components
+        self._write_runtime_components()
 
     def _write_page_component(self, name: str):
         class_name = self._class_name(name)
@@ -640,8 +671,9 @@ code, pre, kbd {
                 root_classes=f"{class_name} ${{className}}".strip(),
                 root_id=name.lower() if name in ("Hero", "Projects", "About", "Capabilities", "Journey", "Toolkit", "CTA") else None,
             )
+            clock_import = 'import LiveClock from "./LiveClock";\n' if "<LiveClock" in emitted_jsx else ""
             code = f"""import React from "react";
-
+{clock_import}
 type {name}Props = {{
   className?: string;
 }};
@@ -990,6 +1022,165 @@ export default function {name}({{
 """
         self._text(f"components/{name}.tsx", code)
 
+    def _write_runtime_components(self):
+        # 1. FramerAppearRuntime.tsx
+        self._text(
+            "components/FramerAppearRuntime.tsx",
+            """\"use client\";
+
+import { useEffect } from "react";
+
+export interface AppearConfig {
+  initial?: Record<string, any>;
+  animate?: Record<string, any>;
+  transition?: Record<string, any>;
+  [key: string]: any;
+}
+
+export default function FramerAppearRuntime({
+  animations = {},
+}: {
+  animations?: Record<string, AppearConfig>;
+}) {
+  useEffect(() => {
+    if (!animations || Object.keys(animations).length === 0) return;
+    if (typeof window === "undefined") return;
+
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      return;
+    }
+
+    Object.entries(animations).forEach(([appearId, config]) => {
+      const el = document.querySelector(`[data-framer-appear-id="${appearId}"]`) as HTMLElement;
+      if (!el) return;
+
+      const initial = config.initial || {};
+      const animate = config.animate || {};
+      const transition = config.transition || {};
+
+      const delayMs = (transition.delay || 0) * 1000;
+      let durationMs = (transition.duration || 0.8) * 1000;
+
+      if (transition.type === "spring") {
+        const stiffness = transition.stiffness || 200;
+        const damping = transition.damping || 40;
+        durationMs = Math.max(600, Math.min(1800, (damping / (2 * Math.sqrt(stiffness))) * 1200 + 400));
+      }
+
+      const initX = initial.x !== undefined ? `${initial.x}px` : "0px";
+      const initY = initial.y !== undefined ? `${initial.y}px` : "0px";
+      const initScale = initial.scale !== undefined ? initial.scale : 1;
+      const initRotate = initial.rotate !== undefined ? `${initial.rotate}deg` : "0deg";
+
+      const targetX = animate.x !== undefined ? `${animate.x}px` : "0px";
+      const targetY = animate.y !== undefined ? `${animate.y}px` : "0px";
+      const targetScale = animate.scale !== undefined ? animate.scale : 1;
+      const targetRotate = animate.rotate !== undefined ? `${animate.rotate}deg` : "0deg";
+
+      const initTransform = `translate(${initX}, ${initY}) scale(${initScale}) rotate(${initRotate})`;
+      const targetTransform = `translate(${targetX}, ${targetY}) scale(${targetScale}) rotate(${targetRotate})`;
+
+      const initOpacity = initial.opacity !== undefined ? initial.opacity : 1;
+      const targetOpacity = animate.opacity !== undefined ? animate.opacity : 1;
+
+      try {
+        el.animate(
+          [
+            { opacity: initOpacity, transform: initTransform },
+            { opacity: targetOpacity, transform: targetTransform },
+          ],
+          {
+            duration: durationMs,
+            delay: delayMs,
+            easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+            fill: "both",
+          }
+        );
+      } catch (err) {
+        el.style.transform = targetTransform;
+        el.style.opacity = `${targetOpacity}`;
+      }
+    });
+  }, [animations]);
+
+  return null;
+}
+""",
+        )
+
+        # 2. CursorFollower.tsx
+        self._text(
+            "components/CursorFollower.tsx",
+            """\"use client\";
+
+import { useEffect, useState } from "react";
+
+export default function CursorFollower() {
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      setPos({ x: e.clientX, y: e.clientY });
+      setVisible(true);
+    };
+    const onLeave = () => setVisible(false);
+
+    window.addEventListener("mousemove", onMove);
+    document.body.addEventListener("mouseleave", onLeave);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      document.body.removeEventListener("mouseleave", onLeave);
+    };
+  }, []);
+
+  if (!pos || !visible) return null;
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        top: pos.y,
+        left: pos.x,
+        transform: "translate(-50%, -50%)",
+        width: 12,
+        height: 12,
+        borderRadius: "50%",
+        backgroundColor: "var(--token-c46abb9d-0d10-414f-ba99-89efb980d54d, #ffffff)",
+        pointerEvents: "none",
+        zIndex: 9999,
+        transition: "transform 0.05s ease-out, opacity 0.2s ease",
+      }}
+    />
+  );
+}
+""",
+        )
+
+        # 3. LiveClock.tsx
+        self._text(
+            "components/LiveClock.tsx",
+            """\"use client\";
+
+import React, { useState, useEffect } from "react";
+
+export default function LiveClock({ initialTime = "14:09:02" }: { initialTime?: string }) {
+  const [time, setTime] = useState(initialTime);
+
+  useEffect(() => {
+    const update = () => {
+      const now = new Date();
+      setTime(now.toLocaleTimeString("en-GB", { hour12: false }));
+    };
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  return <span suppressHydrationWarning>{time}</span>;
+}
+""",
+        )
 
     # ---------------------------------------------------------
     # Pages
@@ -1016,7 +1207,7 @@ export default function {name}({{
             else:
                 self._write_custom_page(clean_route)
 
-        # Ensure contact and sample work route always exist if typical portfolio structure
+        # Ensure contact and dynamic work route exist
         self._write_contact_page()
         self._write_work_dynamic_page()
 
@@ -1065,21 +1256,41 @@ export default function {name}({{
 """
         )
 
-
         self._text("app/page.tsx", content)
 
     def _write_contact_page(self):
         self._text(
             "app/contact/page.tsx",
-            """import HeaderNavigation from "../../components/HeaderNavigation";
+            """import React from "react";
+import HeaderNavigation from "../../components/HeaderNavigation";
 import Footer from "../../components/Footer";
 
 export default function ContactPage() {
   return (
     <main>
       <HeaderNavigation />
-      <section className="page-section">
-        <h1 style={{ fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 800 }}>Contact</h1>
+      <section style={{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "60vh" }}>
+        <p style={{ fontFamily: "var(--font-mono, monospace)", fontSize: "14px", letterSpacing: "0.1em", opacity: 0.7, marginBottom: "16px" }}>// CONTACT</p>
+        <h1 style={{ fontFamily: "var(--font-display)", fontSize: "clamp(48px, 8vw, 96px)", fontWeight: 700, lineHeight: 1, margin: "0 0 32px 0" }}>
+          LET'S BUILD TOGETHER
+        </h1>
+        <p style={{ fontFamily: "var(--font-body)", fontSize: "20px", maxWidth: "600px", opacity: 0.8, lineHeight: 1.6, marginBottom: "48px" }}>
+          Available for innovative projects worldwide. Combining design engineering, machine learning, and high-performance interfaces.
+        </p>
+        <div style={{ display: "flex", gap: "24px", flexWrap: "wrap", marginBottom: "64px" }}>
+          <a
+            href="mailto:contact@example.com"
+            style={{ display: "inline-flex", alignItems: "center", padding: "16px 32px", borderRadius: "9999px", background: "var(--color-foreground, #ffffff)", color: "var(--color-background, #0a0a0a)", fontWeight: 600, textDecoration: "none" }}
+          >
+            GET IN TOUCH
+          </a>
+          <a
+            href="/"
+            style={{ display: "inline-flex", alignItems: "center", padding: "16px 32px", borderRadius: "9999px", border: "1px solid rgba(255,255,255,0.2)", color: "inherit", textDecoration: "none" }}
+          >
+            ← Back to Overview
+          </a>
+        </div>
       </section>
       <Footer />
     </main>
@@ -1091,26 +1302,43 @@ export default function ContactPage() {
     def _write_work_dynamic_page(self):
         self._text(
             "app/work/[slug]/page.tsx",
-            """import HeaderNavigation from "../../../components/HeaderNavigation";
+            """import React from "react";
+import HeaderNavigation from "../../../components/HeaderNavigation";
 import Footer from "../../../components/Footer";
+import { projects } from "../../../data/projects";
 
 type WorkPageProps = {
   params: Promise<{ slug: string }>;
 };
 
-export default async function WorkPage({ params }: WorkPageProps) {
+export default async function DynamicWorkPage({ params }: WorkPageProps) {
   const { slug } = await params;
-  const title = slug
-    .split("-")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
+  const proj = projects.find(
+    (p: any) => p.slug === slug || p.title.toLowerCase().replace(/\\s+/g, "-") === slug
+  );
+  const title = proj?.title || slug.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  const desc = proj?.description || `Case study for ${title}.`;
+  const image = proj?.image;
 
   return (
     <main>
       <HeaderNavigation />
-      <section className="page-section">
-        <h1 style={{ fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 800 }}>{title}</h1>
-      </section>
+      <article style={{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "70vh" }}>
+        <div style={{ marginBottom: "24px" }}>
+          <a href="/" style={{ opacity: 0.6, textDecoration: "none", fontSize: "14px", fontFamily: "var(--font-mono, monospace)" }}>
+            ← Back to Overview
+          </a>
+        </div>
+        <h1 style={{ fontFamily: "var(--font-display)", fontSize: "clamp(40px, 6vw, 72px)", fontWeight: 700, margin: "0 0 24px 0" }}>
+          {title}
+        </h1>
+        <p style={{ fontFamily: "var(--font-body)", fontSize: "20px", opacity: 0.8, lineHeight: 1.6, maxWidth: "720px" }}>
+          {desc}
+        </p>
+        {image && (
+          <img src={image} alt={title} style={{ width: "100%", maxHeight: "640px", objectFit: "cover", borderRadius: "16px", margin: "40px 0" }} />
+        )}
+      </article>
       <Footer />
     </main>
   );
@@ -1121,19 +1349,48 @@ export default async function WorkPage({ params }: WorkPageProps) {
     def _write_work_page(self, route: str):
         slug = route.rstrip("/").split("/")[-1]
         title = self._title_from_slug(slug)
+        projects = self.ir.get("data", {}).get("projects", [])
+        proj = next((p for p in projects if p.get("slug") == slug or self._slugify(p.get("title", "")) == slug), None)
+
+        proj_title = proj.get("title") if proj else title
+        proj_cat = proj.get("category") if proj else "Case Study"
+        proj_img = proj.get("image") if proj else None
+        proj_desc = proj.get("description") if proj else f"High-fidelity case study for {proj_title}."
+        proj_tags = (proj.get("tags") if proj else None) or ["AI / Machine Learning", "Creative Development"]
+
+        img_markup = f'<img src="{proj_img}" alt="{proj_title}" style={{{{ width: "100%", maxHeight: "640px", objectFit: "cover", borderRadius: "16px", margin: "40px 0" }}}} />' if proj_img else ""
+        tags_markup = "\n".join([f'          <span key="{i}" style={{{{ padding: "6px 14px", borderRadius: "9999px", background: "rgba(255,255,255,0.08)", fontSize: "14px", fontFamily: "var(--font-mono, monospace)" }}}}>{t}</span>' for i, t in enumerate(proj_tags)])
 
         self._text(
             f"app/work/{slug}/page.tsx",
-            f"""import HeaderNavigation from "../../../components/HeaderNavigation";
+            f"""import React from "react";
+import HeaderNavigation from "../../../components/HeaderNavigation";
 import Footer from "../../../components/Footer";
 
 export default function WorkPage() {{
   return (
     <main>
       <HeaderNavigation />
-      <section className="page-section">
-        <h1 style={{{{ fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 800 }}}}>{title}</h1>
-      </section>
+      <article style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "70vh" }}}}>
+        <div style={{{{ marginBottom: "24px" }}}}>
+          <a href="/" style={{{{ opacity: 0.6, textDecoration: "none", fontSize: "14px", fontFamily: "var(--font-mono, monospace)" }}}}>
+            ← Back to Overview
+          </a>
+        </div>
+        <p style={{{{ fontFamily: "var(--font-mono, monospace)", fontSize: "14px", letterSpacing: "0.1em", opacity: 0.7, marginBottom: "8px", textTransform: "uppercase" }}}}>
+          {proj_cat}
+        </p>
+        <h1 style={{{{ fontFamily: "var(--font-display)", fontSize: "clamp(40px, 6vw, 72px)", fontWeight: 700, margin: "0 0 24px 0" }}}}>
+          {proj_title}
+        </h1>
+        <p style={{{{ fontFamily: "var(--font-body)", fontSize: "20px", opacity: 0.8, lineHeight: 1.6, maxWidth: "720px" }}}}>
+          {proj_desc}
+        </p>
+        <div style={{{{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "24px" }}}}>
+{tags_markup}
+        </div>
+        {img_markup}
+      </article>
       <Footer />
     </main>
   );
@@ -1182,6 +1439,7 @@ export default function {title.replace(' ', '')}Page() {{
             "data/projects.ts",
             """export type Project = {
   title: string;
+  slug?: string;
   description?: string;
   category?: string;
   image?: string | null;
@@ -1350,6 +1608,10 @@ export const toolkit: ToolkitSkill[] = """
             "-",
             " ",
         ).title()
+
+    @staticmethod
+    def _slugify(text: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9]+", "-", str(text).lower()).strip("-")
 
     @staticmethod
     def _project_name() -> str:

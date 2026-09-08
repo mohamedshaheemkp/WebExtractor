@@ -15,6 +15,8 @@ from .site import SiteModel
 from .tokens import DesignTokenExtractor
 from .typography_engine import TypographyEngine
 from .layout_engine import LayoutFidelityEngine
+from .source_css import extract_relevant_css
+from .animations import AnimationExtractor
 
 
 class SiteAnalyzer:
@@ -32,8 +34,6 @@ class SiteAnalyzer:
         self.typography_engine = TypographyEngine()
         self.layout_engine = LayoutFidelityEngine()
 
-
-
     def analyze(
         self,
         capture: dict[str, Any],
@@ -47,6 +47,11 @@ class SiteAnalyzer:
         routes = self.routes.analyze(html, url)
 
         rendered_dom = capture.get("dom")
+        if (not rendered_dom or not rendered_dom.get("children")) and html:
+            rendered_dom = self._html_to_dom_tree(html)
+        elif rendered_dom and html:
+            self._enrich_dom_attributes(rendered_dom, html)
+
         component_tree = None
         repeated_components = {}
         raw_tokens = {}
@@ -115,6 +120,67 @@ class SiteAnalyzer:
             reusable_components=reusable_components,
         )
 
+        # Extract relevant CSS and font faces for referenced DOM classes
+        referenced_classes: set[str] = set()
+        def _collect_classes(n: dict[str, Any] | None):
+            if not n or not isinstance(n, dict):
+                return
+            for c in n.get("classes", []):
+                referenced_classes.add(c)
+            for ch in n.get("children", []):
+                _collect_classes(ch)
+
+        if component_tree:
+            _collect_classes(component_tree)
+
+        font_families = [f.get("name") for f in typography.get("font_families", [])] if typography else []
+        component_styles["source_rules"] = extract_relevant_css(
+            html_content=html,
+            referenced_classes=referenced_classes,
+            font_families=font_families,
+            external_css=capture.get("css", ""),
+        )
+
+        # Extract animations and interactive metadata
+        animations = AnimationExtractor.extract_animations(
+            html_content=html,
+            css_content=capture.get("css", ""),
+        )
+
+        # Extract projects from work routes/links if present in HTML
+        if html:
+            try:
+                from bs4 import BeautifulSoup
+                soup_proj = BeautifulSoup(html, "html.parser")
+                work_projects = []
+                for a in soup_proj.find_all("a"):
+                    href = a.get("href", "")
+                    if "/work/" in href:
+                        slug = href.rstrip("/").split("/")[-1]
+                        title_elem = a.find(["h1", "h2", "h3", "h4", "h5", "h6"])
+                        p_elems = a.find_all("p")
+                        title = title_elem.get_text(strip=True) if title_elem else ""
+                        cat = p_elems[0].get_text(strip=True) if p_elems else ""
+                        if not title:
+                            parts = a.get_text("|", strip=True).split("|")
+                            title = parts[0].strip() if parts else slug
+                            cat = parts[1].strip() if len(parts) > 1 else ""
+                        img = a.find("img")
+                        img_src = img.get("src") if img else None
+                        if title and not any(p.get("slug") == slug for p in work_projects):
+                            work_projects.append({
+                                "slug": slug,
+                                "title": title,
+                                "category": cat,
+                                "description": f"{title} — {cat}" if cat else title,
+                                "image": img_src,
+                                "tags": [cat] if cat else ["Featured"],
+                            })
+                if work_projects:
+                    data["projects"] = work_projects
+            except Exception:
+                pass
+
         # Propagate image bindings into project datasets (strictly real paths or None)
         project_bindings = [
             b for b in asset_bindings
@@ -123,7 +189,7 @@ class SiteAnalyzer:
         for idx, proj in enumerate(data.get("projects", [])):
             if idx < len(project_bindings):
                 proj["image"] = project_bindings[idx].local_path
-            else:
+            elif not proj.get("image"):
                 proj["image"] = None
 
         pages = [
@@ -175,6 +241,7 @@ class SiteAnalyzer:
         setattr(site_model, "layout", layout)
         setattr(site_model, "responsive_rules", capture.get("responsive_rules", []))
         setattr(site_model, "viewports", capture.get("viewports", {}))
+        setattr(site_model, "animations", animations)
 
         return site_model
 
@@ -460,5 +527,86 @@ class SiteAnalyzer:
             }
 
         return styles
+
+    def _enrich_dom_attributes(self, rendered_dom: dict[str, Any], html: str) -> None:
+        """Enriches raw captured DOM nodes with attributes (viewBox, width, height, style, etc.) from HTML."""
+        if not rendered_dom or not html:
+            return
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            body_tag = soup.body
+            if not body_tag:
+                return
+
+            def _enrich(node: dict[str, Any], elem: Any):
+                if not elem or not hasattr(elem, "attrs"):
+                    return
+                attrs = dict(node.get("attributes") or {})
+                for k, v in elem.attrs.items():
+                    attr_name = "viewBox" if k.lower() == "viewbox" else k
+                    if isinstance(v, list):
+                        v = " ".join(v)
+                    if attr_name not in ("class",):
+                        attrs[attr_name] = str(v)
+                if attrs:
+                    node["attributes"] = attrs
+
+                elem_children = [c for c in elem.children if hasattr(c, "name") and c.name]
+                node_children = node.get("children", [])
+                for nc, ec in zip(node_children, elem_children):
+                    _enrich(nc, ec)
+
+            _enrich(rendered_dom, body_tag)
+        except Exception:
+            pass
+
+    def _html_to_dom_tree(self, html: str) -> dict[str, Any]:
+        """Constructs a full DOM tree dictionary from HTML when browser snapshot is absent or empty."""
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            body = soup.body
+            if not body:
+                return {"tag": "body", "children": []}
+
+            def _convert(elem: Any, depth: int = 0) -> dict[str, Any] | None:
+                if not elem or depth > 20:
+                    return None
+                tag = elem.name
+                classes = elem.get("class", [])
+                if isinstance(classes, str):
+                    classes = classes.split()
+                element_id = elem.get("id")
+                child_tags = [c for c in elem.children if hasattr(c, "name") and c.name]
+                text = elem.get_text(" ", strip=True)[:500] if not child_tags else ""
+                attrs: dict[str, str] = {}
+                for k, v in elem.attrs.items():
+                    attr_name = "viewBox" if k.lower() == "viewbox" else k
+                    if isinstance(v, list):
+                        v = " ".join(v)
+                    if attr_name not in ("class", "id"):
+                        attrs[attr_name] = str(v)
+
+                children = []
+                for child in elem.children:
+                    if hasattr(child, "name") and child.name and child.name not in ("script", "style", "noscript"):
+                        c_node = _convert(child, depth + 1)
+                        if c_node:
+                            children.append(c_node)
+
+                return {
+                    "tag": tag,
+                    "id": element_id,
+                    "classes": classes,
+                    "text": text,
+                    "attributes": attrs,
+                    "children": children,
+                    "styles": {},
+                }
+
+            return _convert(body, 0) or {"tag": "body", "children": []}
+        except Exception:
+            return {"tag": "body", "children": []}
 
 
