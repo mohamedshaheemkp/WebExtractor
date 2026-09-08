@@ -116,20 +116,6 @@ class DomToJsxEmitter:
         "focusable", "tabindex", "role",
     }
 
-    COMPONENT_KEYWORDS: dict[str, list[str]] = {
-        "HeaderNavigation": ["nav", "header", "menu", "navigation"],
-        "Hero": ["hero", "headline", "welcome", "banner"],
-        "Intro": ["intro", "overview", "summary"],
-        "Projects": ["project", "selected projects", "portfolio", "case studies", "work"],
-        "About": ["about", "story", "team", "mission", "who we are", "who am i"],
-        "Capabilities": ["service", "capability", "capabilities", "features", "solutions"],
-        "VoiceOfMS": ["testimonials", "reviews", "quotes", "voice", "feedback"],
-        "Journey": ["journey", "timeline", "history", "experience", "milestones"],
-        "Toolkit": ["skills", "toolkit", "technologies", "stack", "tools"],
-        "CTA": ["cta", "contact", "get in touch", "let's talk", "let's build", "join"],
-        "Footer": ["footer", "copyright", "rights reserved", "back to top"],
-    }
-
     def __init__(
         self,
         component_tree: dict[str, Any] | None = None,
@@ -149,6 +135,10 @@ class DomToJsxEmitter:
         else:
             self.motion_targets = set()
 
+    # ------------------------------------------------------------------
+    # Structural Section Decomposition (generic, platform-agnostic)
+    # ------------------------------------------------------------------
+
     @classmethod
     def decompose_content_sections(
         cls,
@@ -159,6 +149,12 @@ class DomToJsxEmitter:
         (content_root, sections)
         Where content_root is the outer layout wrapper (e.g. <main> or root <div>),
         and sections are its direct children, strictly non-overlapping and disjoint.
+
+        Naming strategy (in priority order):
+          1. data-component-name / data-framer-name / aria-label attribute
+          2. Semantic HTML tag + existing element ID
+          3. Indexed Section_NN fallback
+        No portfolio-specific or platform-specific hardcoded names are used.
         """
         if not root_node:
             return None, []
@@ -166,6 +162,7 @@ class DomToJsxEmitter:
         def count_nodes(n: dict[str, Any]) -> int:
             return 1 + sum(count_nodes(c) for c in n.get("children", []) if isinstance(c, dict))
 
+        # Drill into the canonical content container
         curr = root_node
         visual_children = [
             c for c in curr.get("children", [])
@@ -211,28 +208,26 @@ class DomToJsxEmitter:
         for idx, s in enumerate(raw_sections):
             attrs = s.get("attributes", {})
             s_tag = (s.get("tag") or "").lower()
-            raw_id = str(s.get("id") or attrs.get("id") or "").lower()
-            classes = [str(c).lower() for c in s.get("classes", [])]
+            raw_id = str(s.get("id") or attrs.get("id") or "").strip()
 
+            # --- Generic naming: derive from attributes, tags, ids ---
             raw_name = (
-                attrs.get("data-framer-name")
-                or attrs.get("data-component-name")
+                attrs.get("data-component-name")
+                or attrs.get("data-framer-name")
                 or attrs.get("aria-label")
             )
+
             if not raw_name:
-                if raw_id == "voice":
-                    raw_name = "VoiceOfMS"
-                elif raw_id in ("contact", "cta"):
-                    raw_name = "CTA"
-                elif raw_id in ("nav", "header") or s_tag in ("header", "nav") or idx == 0:
-                    raw_name = "HeaderNavigation"
-                elif raw_id in ("footer",) or s_tag == "footer" or idx == len(raw_sections) - 1:
-                    raw_name = "Footer"
-                elif s.get("id"):
-                    raw_name = s.get("id")
-                elif any("hero" in c for c in classes) or (idx == 1 and len(raw_sections) > 2):
-                    raw_name = "Hero"
+                # Use semantic tag as basis for generic name
+                if s_tag in ("header", "nav"):
+                    raw_name = "Header" if not raw_id else raw_id
+                elif s_tag == "footer":
+                    raw_name = "Footer" if not raw_id else raw_id
+                elif raw_id:
+                    # Use the element's own ID for the name
+                    raw_name = raw_id
                 else:
+                    # Indexed fallback — no content guessing
                     raw_name = f"Section_{idx + 1:02d}"
 
             raw_str = str(raw_name)
@@ -263,11 +258,22 @@ class DomToJsxEmitter:
 
         return content_root, sections
 
+    # ------------------------------------------------------------------
+    # Component Node Lookup (structural only, no keyword guessing)
+    # ------------------------------------------------------------------
+
     def find_node_for_component(self, name: str) -> dict[str, Any] | None:
         """
-        Locates the authoritative DOM node for a component using structural partitioning.
-        Strict invariant: An ancestor node containing the whole page can NEVER be returned
-        as a sub-component, preventing parent-child duplication.
+        Locates the authoritative DOM node for a named component using
+        structural partitioning only.
+
+        Strict invariant: An ancestor node containing the whole page can NEVER
+        be returned as a sub-component, preventing parent-child duplication.
+
+        Match strategy (in order):
+          1. Exact section name match from decompose_content_sections
+          2. Semantic tag match (header/nav → Header*, footer → Footer*)
+          3. Soft substring match on section name, ID, or data-attributes
         """
         if not self.tree:
             return None
@@ -275,104 +281,43 @@ class DomToJsxEmitter:
         content_root, sections = self.decompose_content_sections(self.tree)
         name_lower = name.lower()
 
-        # 1. Match against direct top-level structural sections first
-        if sections:
-            # 1a. Exact name match (e.g. "Hero", "About", "Portfolio", "SectionImage")
-            for sec in sections:
-                if sec["name"].lower() == name_lower:
-                    return sec["node"]
+        if not sections:
+            return None
 
-            # 1b. Match by keywords against section name and attributes
-            keywords = self.COMPONENT_KEYWORDS.get(name, [name_lower])
-            for idx, sec in enumerate(sections):
-                s_node = sec["node"]
-                s_name = sec["name"].lower()
-                s_tag = (s_node.get("tag") or "").lower()
-                s_attrs = s_node.get("attributes", {})
-                raw_name = str(s_attrs.get("data-framer-name") or s_attrs.get("name") or s_attrs.get("aria-label") or s_node.get("id") or "").lower()
+        # 1. Exact name match (e.g. "Hero", "About", "Portfolio", "Section_01")
+        for sec in sections:
+            if sec["name"].lower() == name_lower:
+                return sec["node"]
 
-                if name_lower in ("headernavigation", "header", "nav") and (s_tag in ("header", "nav") or s_node.get("id") == "nav" or "nav" in s_name or idx == 0):
+        # 2. Semantic tag match for header/footer
+        for idx, sec in enumerate(sections):
+            s_node = sec["node"]
+            s_tag = (s_node.get("tag") or "").lower()
+
+            if name_lower in ("headernavigation", "header", "nav"):
+                if s_tag in ("header", "nav") or idx == 0:
                     return s_node
-                if name_lower in ("footer",) and (s_tag == "footer" or "footer" in s_name or (idx == len(sections) - 1 and idx > 0)):
+            if name_lower == "footer":
+                if s_tag == "footer" or (idx == len(sections) - 1 and idx > 0):
                     return s_node
 
-                for kw in keywords:
-                    if kw in s_name or (raw_name and kw in raw_name):
-                        return s_node
+        # 3. Soft substring match on section name, element ID, or data-attributes
+        for sec in sections:
+            s_node = sec["node"]
+            s_name = sec["name"].lower()
+            s_attrs = s_node.get("attributes", {})
+            raw_label = str(
+                s_attrs.get("data-component-name")
+                or s_attrs.get("data-framer-name")
+                or s_attrs.get("aria-label")
+                or s_node.get("id")
+                or ""
+            ).lower()
 
-        # 2. Structural leaf search: strictly reject ancestor wrappers that have child sections
-        keywords = self.COMPONENT_KEYWORDS.get(name, [name_lower])
-        scored_candidates: list[tuple[int, int, int, dict[str, Any]]] = []
-
-        def _get_node_text(node: dict[str, Any]) -> str:
-            collected = [node.get("text") or ""]
-            for child in node.get("children", []):
-                collected.append(_get_node_text(child))
-            return " ".join(filter(None, collected)).lower()
-
-        def _score_tree(n: dict[str, Any], depth: int):
-            tag = (n.get("tag") or "").lower()
-            classes = [str(c).lower() for c in n.get("classes", [])]
-            node_id = str(n.get("id") or "").lower()
-
-            if tag == "body" or depth == 0 or n is content_root:
-                for ch in n.get("children", []):
-                    _score_tree(ch, depth + 1)
-                return
-
-            # Never allow a container with multiple child sections to be matched as a single leaf section
-            child_sections = [
-                c for c in n.get("children", [])
-                if isinstance(c, dict) and (
-                    (c.get("tag") or "").lower() in ("section", "header", "footer", "nav", "article")
-                    or any(str(cl).endswith("-container") for cl in c.get("classes", []))
-                )
-            ]
-            if len(child_sections) > 1:
-                for ch in n.get("children", []):
-                    _score_tree(ch, depth + 1)
-                return
-
-            is_semantic_section = tag in ("header", "nav", "section", "footer", "main", "article")
-            is_container_div = (tag == "div" and (any(c.endswith("-container") for c in classes) or depth <= 4))
-
-            if is_semantic_section or is_container_div:
-                txt = _get_node_text(n)
-                score = 0
-                for kw in keywords:
-                    if kw in txt:
-                        score += len(kw) * 4
-
-                n_attrs = n.get("attributes") or {}
-                n_name = (n.get("name") or n_attrs.get("data-framer-name") or n_attrs.get("aria-label") or "").lower()
-                if n_name == name.lower():
-                    score += 120
-                elif name.lower() in n_name:
-                    score += 80
-
-                if any(name.lower() in c or c in name.lower() for c in classes) or (node_id and (name.lower() in node_id or node_id in name.lower())):
-                    score += 50
-
-                if tag in ("header", "nav") and "Header" in name:
-                    score += 50
-                elif tag == "footer" and "Footer" in name:
-                    score += 50
-                elif tag == "section" and name not in ("HeaderNavigation", "Footer"):
-                    score += 30
-
-                depth_penalty = depth * 2
-
-                if score > 0:
-                    scored_candidates.append((score - depth_penalty, -depth, -len(txt), n))
-
-            for ch in n.get("children", []):
-                _score_tree(ch, depth + 1)
-
-        _score_tree(self.tree, 0)
-
-        if scored_candidates:
-            scored_candidates.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
-            return scored_candidates[0][3]
+            if name_lower in s_name or name_lower in raw_label:
+                return s_node
+            if s_name in name_lower:
+                return s_node
 
         return None
 

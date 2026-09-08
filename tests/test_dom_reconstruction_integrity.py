@@ -6,11 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from webextractor.analysis.analyzer import SiteAnalyzer
 from webextractor.analysis.source_css import extract_relevant_css
 from webextractor.generator.dom_emitter import DomToJsxEmitter
 from webextractor.generator.project import ReactProjectGenerator
-from webextractor.model.site_ir import SiteIR
 
 
 class TestDomReconstructionIntegrity(unittest.TestCase):
@@ -73,8 +71,11 @@ class TestDomReconstructionIntegrity(unittest.TestCase):
         # Verify section names are unique and match structure
         names = [s["name"] for s in sections]
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual(names[0], "HeaderNavigation")
+        # First section is a header tag → named "Header"
+        self.assertEqual(names[0], "Header")
+        # Second section has data-component-name="Hero" → named "Hero"
         self.assertEqual(names[1], "Hero")
+        # Third section is a footer tag → named "Footer"
         self.assertEqual(names[2], "Footer")
 
     def test_no_full_page_ancestor_as_child_section(self):
@@ -106,16 +107,16 @@ class TestDomReconstructionIntegrity(unittest.TestCase):
 
         emitter = DomToJsxEmitter(tree)
 
-        # "CTA" or "Contact" must match section#contact, NEVER div.page-wrapper
-        cta_node = emitter.find_node_for_component("CTA")
-        self.assertIsNotNone(cta_node)
-        self.assertEqual(cta_node.get("id"), "contact")
-        self.assertEqual(cta_node.get("tag"), "section")
+        # "contact" must match section#contact via ID-based naming, NEVER div.page-wrapper
+        contact_node = emitter.find_node_for_component("Contact")
+        self.assertIsNotNone(contact_node)
+        self.assertEqual(contact_node.get("id"), "contact")
+        self.assertEqual(contact_node.get("tag"), "section")
 
-        # "Hero" must match section#hero, NEVER div.page-wrapper
-        hero_node = emitter.find_node_for_component("Hero")
-        self.assertIsNotNone(hero_node)
-        self.assertEqual(hero_node.get("id"), "hero")
+        # "header" must match header#header, NEVER div.page-wrapper
+        header_node = emitter.find_node_for_component("Header")
+        self.assertIsNotNone(header_node)
+        self.assertEqual(header_node.get("id"), "header")
 
     def test_layout_wrapper_preservation_in_home_page(self):
         """Validates that app/page.tsx preserves the content root wrapper element and its classes/styles."""
@@ -127,7 +128,7 @@ class TestDomReconstructionIntegrity(unittest.TestCase):
                 {
                     "route": "/",
                     "components": [
-                        {"name": "HeaderNavigation", "type": "header"},
+                        {"name": "Header", "type": "header"},
                         {"name": "Hero", "type": "section"},
                         {"name": "Footer", "type": "footer"},
                     ],
@@ -139,7 +140,7 @@ class TestDomReconstructionIntegrity(unittest.TestCase):
                 "attributes": {"style": "min-height: 100vh; width: auto;"},
                 "children": [
                     {"tag": "header", "id": "nav", "children": []},
-                    {"tag": "section", "id": "hero", "children": []},
+                    {"tag": "section", "id": "hero", "attributes": {"data-component-name": "Hero"}, "children": []},
                     {"tag": "footer", "id": "foot", "children": []},
                 ],
             },
@@ -152,7 +153,7 @@ class TestDomReconstructionIntegrity(unittest.TestCase):
         # Wrapper element must be present around page sections
         self.assertIn('className="framer-vGE5i outer-layout"', page_tsx)
         self.assertIn("minHeight", page_tsx)
-        self.assertIn("<HeaderNavigation />", page_tsx)
+        self.assertIn("<Header />", page_tsx)
         self.assertIn("<Hero />", page_tsx)
         self.assertIn("<Footer />", page_tsx)
 
@@ -227,6 +228,122 @@ class TestDomReconstructionIntegrity(unittest.TestCase):
         content = work_index_path.read_text(encoding="utf-8")
         self.assertIn("Selected Work", content)
         self.assertIn("/work/project-one", content)
+
+    def test_captured_route_dom_used(self):
+        """Validates that sub-route pages with captured DOM use the authentic DOM instead of synthetic scaffolds."""
+        site_ir = {
+            "metadata": {"title": "Multi Route Site"},
+            "routes": ["/", "/about"],
+            "design_system": {},
+            "pages": [
+                {
+                    "route": "/",
+                    "components": [{"name": "Header", "type": "header"}, {"name": "Footer", "type": "footer"}],
+                },
+                {
+                    "route": "/about",
+                    "title": "About Us",
+                    "dom": {
+                        "tag": "div",
+                        "children": [
+                            {"tag": "h1", "text": "About Our Company", "children": []},
+                            {"tag": "p", "text": "We build great things.", "children": []},
+                        ],
+                    },
+                    "components": [{"name": "Section_01", "type": "section"}],
+                },
+            ],
+        }
+        generator = ReactProjectGenerator(site_ir, self.temp_dir)
+        generator.generate()
+
+        about_path = self.temp_dir / "app/about/page.tsx"
+        self.assertTrue(about_path.exists())
+        content = about_path.read_text(encoding="utf-8")
+        # Content must come from the captured DOM, not fabricated
+        self.assertIn("About Our Company", content)
+        self.assertIn("We build great things.", content)
+
+    def test_uncaptured_route_shows_notice(self):
+        """Validates that uncaptured routes get a notice, not fabricated content."""
+        site_ir = {
+            "metadata": {"title": "Site"},
+            "routes": ["/", "/pricing"],
+            "design_system": {},
+            "pages": [
+                {"route": "/", "components": [{"name": "Header", "type": "header"}]},
+            ],
+        }
+        generator = ReactProjectGenerator(site_ir, self.temp_dir)
+        generator.generate()
+
+        pricing_path = self.temp_dir / "app/pricing/page.tsx"
+        self.assertTrue(pricing_path.exists())
+        content = pricing_path.read_text(encoding="utf-8")
+        self.assertIn("not captured", content)
+        # Must NOT contain fabricated marketing copy
+        self.assertNotIn("Get in Touch", content)
+        self.assertNotIn("contact@example.com", content)
+
+    def test_generic_non_framer_html_reconstruction(self):
+        """Validates that a clean standard HTML site reconstructs without any platform coupling."""
+        tree = {
+            "tag": "div",
+            "classes": ["site-root"],
+            "children": [
+                {
+                    "tag": "nav",
+                    "id": "main-nav",
+                    "children": [
+                        {"tag": "a", "attributes": {"href": "/"}, "text": "Home", "children": []},
+                        {"tag": "a", "attributes": {"href": "/products"}, "text": "Products", "children": []},
+                    ],
+                },
+                {
+                    "tag": "section",
+                    "id": "welcome",
+                    "children": [
+                        {"tag": "h1", "text": "Welcome to Our Store", "children": []},
+                    ],
+                },
+                {
+                    "tag": "section",
+                    "id": "products",
+                    "children": [
+                        {"tag": "h2", "text": "Featured Products", "children": []},
+                        {"tag": "div", "classes": ["product-card"], "text": "Widget A", "children": []},
+                    ],
+                },
+                {
+                    "tag": "footer",
+                    "children": [
+                        {"tag": "p", "text": "© 2026 Store Inc.", "children": []},
+                    ],
+                },
+            ],
+        }
+
+        content_root, sections = DomToJsxEmitter.decompose_content_sections(tree)
+        self.assertIsNotNone(content_root)
+        self.assertEqual(len(sections), 4)
+
+        names = [s["name"] for s in sections]
+        # nav → "MainNav" (from id), sections → "Welcome", "Products" (from id), footer → "Footer"
+        self.assertEqual(names[0], "MainNav")
+        self.assertEqual(names[1], "Welcome")
+        self.assertEqual(names[2], "Products")
+        self.assertEqual(names[3], "Footer")
+
+        # None of the names should contain portfolio-specific hardcoded terms
+        for name in names:
+            self.assertNotIn("VoiceOfMS", name)
+            self.assertNotIn("HeaderNavigation", name)
+            self.assertNotIn("CTA", name)
+            self.assertNotIn("Toolkit", name)
+
+    def test_no_component_keywords_on_emitter(self):
+        """Validates that COMPONENT_KEYWORDS has been removed from DomToJsxEmitter."""
+        self.assertFalse(hasattr(DomToJsxEmitter, "COMPONENT_KEYWORDS"))
 
 
 if __name__ == "__main__":

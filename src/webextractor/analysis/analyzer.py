@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from webextractor.assets.binding import AssetBindingEngine
@@ -213,15 +214,33 @@ class SiteAnalyzer:
                         "dom": cp_dom or rendered_dom,
                     })
                 else:
+                    # Use captured DOM to infer actual page structure
+                    sub_components: list[dict[str, Any]] = []
+                    if cp_dom:
+                        from webextractor.generator.dom_emitter import DomToJsxEmitter
+                        _, sub_sections = DomToJsxEmitter.decompose_content_sections(cp_dom)
+                        for si, sec in enumerate(sub_sections):
+                            s_tag = (sec.get("tag") or "").lower()
+                            sec_type = "header" if (si == 0 and s_tag in ("header", "nav", "div")) else (
+                                "footer" if (si == len(sub_sections) - 1 and s_tag in ("footer", "div")) else "section"
+                            )
+                            sub_components.append({
+                                "name": sec["name"],
+                                "type": sec_type,
+                                "tag": sec["tag"],
+                            })
+                    if not sub_components:
+                        # Fallback when no DOM captured for this route
+                        sub_components = [
+                            {"name": "Header", "type": "header"},
+                            {"name": "Section_01", "type": "section"},
+                            {"name": "Footer", "type": "footer"},
+                        ]
                     pages.append({
                         "route": cp_route,
                         "title": cp.get("title", ""),
                         "dom": cp_dom,
-                        "components": [
-                            {"name": "HeaderNavigation", "type": "section"},
-                            {"name": "MainContent", "type": "section"},
-                            {"name": "Footer", "type": "section"},
-                        ],
+                        "components": sub_components,
                     })
         else:
             pages = [
@@ -236,9 +255,9 @@ class SiteAnalyzer:
                     pages.append({
                         "route": r if r.startswith("/") else f"/{r}",
                         "components": [
-                            {"name": "HeaderNavigation", "type": "section"},
-                            {"name": "MainContent", "type": "section"},
-                            {"name": "Footer", "type": "section"},
+                            {"name": "Header", "type": "header"},
+                            {"name": "Section_01", "type": "section"},
+                            {"name": "Footer", "type": "footer"},
                         ],
                     })
 
@@ -299,17 +318,29 @@ class SiteAnalyzer:
                         "type": sec_type,
                         "tag": sec["tag"],
                     }
-                    s_lower = sec["name"].lower()
-                    if s_lower in ("portfolio", "projects"):
+
+                    # Detect repeating-item data patterns from section content
+                    s_name_lower = sec["name"].lower()
+                    s_node = sec.get("node", {})
+                    s_attrs = s_node.get("attributes", {}) if isinstance(s_node, dict) else {}
+                    label = str(
+                        s_attrs.get("data-component-name")
+                        or s_attrs.get("aria-label")
+                        or s_node.get("id")
+                        or ""
+                    ).lower()
+                    combined = f"{s_name_lower} {label}"
+
+                    if any(kw in combined for kw in ("project", "portfolio", "work", "case")):
                         item["children"] = ["ProjectCard"]
                         item["data_key"] = "projects"
-                    elif s_lower in ("services", "capabilities"):
+                    elif any(kw in combined for kw in ("service", "capabil", "feature")):
                         item["children"] = ["CapabilityItem"]
                         item["data_key"] = "capabilities"
-                    elif s_lower in ("experience", "journey"):
+                    elif any(kw in combined for kw in ("experience", "journey", "timeline")):
                         item["children"] = ["JourneyItem"]
                         item["data_key"] = "journey"
-                    elif s_lower in ("stacktools", "toolsandframeworks", "toolkit"):
+                    elif any(kw in combined for kw in ("tool", "stack", "skill", "tech")):
                         item["children"] = ["ToolkitItem"]
                         item["data_key"] = "toolkit"
                     elif sec_type == "header":
@@ -318,89 +349,42 @@ class SiteAnalyzer:
                     result.append(item)
                 return result
 
-        sections = dom.get("sections", [])
-        headings = [h.get("text", "").lower() for h in dom.get("headings", [])]
-        text_corpus = " ".join(s.get("text_preview", "") for s in sections).lower()
+        # Fallback: infer from raw HTML structure (no rendered DOM available)
+        sections_raw = dom.get("sections", [])
+        headings = [h.get("text", "").strip() for h in dom.get("headings", [])]
 
         detected: list[dict[str, Any]] = []
 
-        # 1. HeaderNavigation
+        # Always emit a header at the top
         detected.append({
-            "name": "HeaderNavigation",
+            "name": "Header",
             "type": "header",
             "children": ["NavItem"],
         })
 
-        # 2. Hero
-        detected.append({
-            "name": "Hero",
-            "type": "hero",
-        })
-
-        # 3. Intro
-        if any("intro" in h or "welcome" in h for h in headings) or "intro" in text_corpus:
+        # Derive section names from headings when possible
+        for idx, heading in enumerate(headings[:10]):
+            if not heading:
+                continue
+            # Create a clean component name from the heading text
+            clean = "".join(w.capitalize() for w in re.split(r"[^a-zA-Z0-9]+", heading) if w)
+            if not clean or clean[0].isdigit():
+                clean = f"Section{clean}"
+            if len(clean) > 40:
+                clean = clean[:40]
             detected.append({
-                "name": "Intro",
+                "name": clean,
                 "type": "section",
             })
 
-        # 4. Projects / Work
-        if any("project" in h or "work" in h or "case stud" in h for h in headings) or "project" in text_corpus:
+        # If no headings found, add a generic content section
+        if len(detected) == 1:
             detected.append({
-                "name": "Projects",
-                "type": "section",
-                "children": ["ProjectCard"],
-                "data_key": "projects",
-            })
-
-        # 5. About
-        if any("about" in h or "who" in h for h in headings) or "about" in text_corpus:
-            detected.append({
-                "name": "About",
+                "name": "Section_01",
                 "type": "section",
             })
 
-        # 6. Capabilities / Services
-        if any("capabil" in h or "service" in h or "offering" in h for h in headings) or "capabil" in text_corpus:
-            detected.append({
-                "name": "Capabilities",
-                "type": "section",
-                "children": ["CapabilityItem"],
-                "data_key": "capabilities",
-            })
-
-        # 7. Voice / Testimonials
-        if any("voice" in h or "testimonial" in h or "review" in h for h in headings) or "voice" in text_corpus:
-            detected.append({
-                "name": "VoiceOfMS",
-                "type": "section",
-            })
-
-        # 8. Journey / Experience / Timeline
-        if any("journey" in h or "experience" in h or "timeline" in h or "history" in h for h in headings) or "journey" in text_corpus:
-            detected.append({
-                "name": "Journey",
-                "type": "section",
-                "children": ["JourneyItem"],
-                "data_key": "journey",
-            })
-
-        # 9. Toolkit / Skills / Tech
-        if any("tool" in h or "skill" in h or "tech" in h or "stack" in h for h in headings) or "toolkit" in text_corpus or "tech" in text_corpus:
-            detected.append({
-                "name": "Toolkit",
-                "type": "section",
-                "children": ["ToolkitItem"],
-                "data_key": "toolkit",
-            })
-
-        # 10. CTA / Contact
-        detected.append({
-            "name": "CTA",
-            "type": "cta",
-        })
-
-        # 11. Footer
+        # Always emit a footer at the bottom
         detected.append({
             "name": "Footer",
             "type": "footer",

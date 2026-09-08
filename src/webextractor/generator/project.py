@@ -612,28 +612,13 @@ code, pre, kbd {
     # ---------------------------------------------------------
 
     def _write_components(self):
-        # 1. Page-level components
+        # 1. Page-level components from SiteIR pages
         pages = self.ir.get("pages", [])
         page_components = []
         if pages:
             page_components = pages[0].get("components", [])
 
-        # Fallback to standard component list if not in pages
-        if not page_components:
-            page_components = [
-                "HeaderNavigation",
-                "Hero",
-                "Intro",
-                "Projects",
-                "About",
-                "Capabilities",
-                "VoiceOfMS",
-                "Journey",
-                "Toolkit",
-                "CTA",
-                "Footer",
-            ]
-
+        # No hardcoded fallback — only emit what was actually found in DOM
         page_comp_names = set()
         for item in page_components:
             name = item.get("name") if isinstance(item, dict) else str(item)
@@ -641,18 +626,10 @@ code, pre, kbd {
                 page_comp_names.add(name)
                 self._write_page_component(name)
 
-        # 2. Reusable Item Components
+        # 2. Reusable Item Components (discovered from DOM clustering)
         reusable = self.ir.get("reusable_components", [])
         if isinstance(reusable, dict):
             reusable = list(reusable.values())
-
-        standard_reusable = [
-            "ProjectCard",
-            "CapabilityItem",
-            "JourneyItem",
-            "ToolkitItem",
-            "NavItem",
-        ]
 
         reusable_names = set()
         for item in reusable:
@@ -661,8 +638,19 @@ code, pre, kbd {
                 cleaned = self._component_name({"name": name})
                 reusable_names.add(cleaned)
 
-        for name in standard_reusable:
-            reusable_names.add(name)
+        # Add standard reusable components only if their parent sections exist in page_components
+        page_comp_names_lower = {n.lower() for n in page_comp_names}
+        data_ir = self.ir.get("data", {})
+        if data_ir.get("projects") or any("project" in n for n in page_comp_names_lower):
+            reusable_names.add("ProjectCard")
+        if data_ir.get("capabilities") or any("capabil" in n or "service" in n for n in page_comp_names_lower):
+            reusable_names.add("CapabilityItem")
+        if data_ir.get("journey") or any("journey" in n or "experience" in n for n in page_comp_names_lower):
+            reusable_names.add("JourneyItem")
+        if data_ir.get("toolkit") or any("tool" in n or "skill" in n for n in page_comp_names_lower):
+            reusable_names.add("ToolkitItem")
+        # NavItem is always useful
+        reusable_names.add("NavItem")
 
         for name in reusable_names:
             if name not in page_comp_names:
@@ -674,15 +662,14 @@ code, pre, kbd {
     def _write_page_component(self, name: str):
         class_name = self._class_name(name)
         node = self.emitter.find_node_for_component(name)
-        asset_bindings = self.ir.get("asset_bindings", [])
-        title = self.ir.get("metadata", {}).get("title") or "Website"
 
         if node:
+            # Emit authentic DOM content from captured snapshot
             emitted_jsx = self.emitter.emit_jsx(
                 node,
                 depth=2,
                 root_classes=f"{class_name} ${{className}}".strip(),
-                root_id=name.lower() if name in ("Hero", "Projects", "About", "Capabilities", "Journey", "Toolkit", "CTA") else None,
+                root_id=name.lower() if node.get("tag") in ("section", "article") else None,
             )
             clock_import = 'import LiveClock from "./LiveClock";\n' if "<LiveClock" in emitted_jsx else ""
             code = f"""import React from "react";
@@ -699,119 +686,8 @@ export default function {name}({{
   );
 }}
 """
-        elif name == "HeaderNavigation":
-            logo_binding = next(
-                (b for b in asset_bindings if b.get("component") == "HeaderNavigation" and b.get("role") == "logo" and b.get("local_path")),
-                None
-            )
-            brand_element = (
-                f'<img src="{logo_binding["local_path"]}" alt="Brand Logo" style={{{{ height: "32px", width: "auto" }}}} />'
-                if logo_binding
-                else f'<strong>{self._escape_jsx(title)}</strong>'
-            )
-            code = f"""import React from "react";
-
-type HeaderNavigationProps = {{
-  className?: string;
-}};
-
-export default function HeaderNavigation({{
-  className = "",
-}}: HeaderNavigationProps) {{
-  return (
-    <header className={{"{class_name} " + className}}>
-      <div className="brand-logo">
-        <a href="/">{brand_element}</a>
-      </div>
-      <nav className="nav-links" style={{{{ fontFamily: "var(--font-body)", fontSize: "var(--type-navigation-size, 14px)", fontWeight: "var(--type-navigation-weight, 500)" }}}}>
-        <a href="#work" className="nav-link">Work</a>
-        <a href="#about" className="nav-link">About</a>
-      </nav>
-    </header>
-  );
-}}
-"""
-        elif name == "Hero":
-            video_b = next(
-                (b for b in asset_bindings if b.get("component") == "Hero" and b.get("role") == "video" and b.get("local_path")),
-                None
-            )
-            poster_b = next(
-                (b for b in asset_bindings if b.get("component") == "Hero" and b.get("role") == "poster" and b.get("local_path")),
-                None
-            )
-            bg_b = next(
-                (b for b in asset_bindings if b.get("component") == "Hero" and b.get("role") in ("background", "image") and b.get("local_path")),
-                None
-            )
-
-            media_element = ""
-            if video_b:
-                poster_attr = f' poster="{poster_b["local_path"]}"' if poster_b else ""
-                media_element = f"""      <video
-        src="{video_b['local_path']}"{poster_attr}
-        autoPlay
-        muted
-        loop
-        playsInline
-        style={{{{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 0, opacity: 0.25 }}}}
-      />\n"""
-            elif bg_b:
-                media_element = f"""      <img
-        src="{bg_b['local_path']}"
-        alt="Hero Media"
-        style={{{{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 0, opacity: 0.2 }}}}
-      />\n"""
-
-            code = f"""import React from "react";
-
-type HeroProps = {{
-  className?: string;
-}};
-
-export default function Hero({{
-  className = "",
-}}: HeroProps) {{
-  return (
-    <section className={{"{class_name} " + className}} id="hero" style={{{{ position: "relative", overflow: "hidden" }}}}>
-{media_element}      <div style={{{{ position: "relative", zIndex: 1 }}}}>
-        <h1 style={{{{ fontFamily: "var(--font-display)", fontSize: "var(--type-hero-size, clamp(48px, 8vw, 110px))", fontWeight: "var(--type-hero-weight, 800)", lineHeight: "var(--type-hero-line-height, 1.05)", margin: "24px 0" }}}}>
-          {self._escape_jsx(title)}
-        </h1>
-        <p style={{{{ fontFamily: "var(--font-body)", fontSize: "var(--type-body-size, clamp(18px, 2.5vw, 28px))", lineHeight: "var(--type-body-line-height, 1.6)", maxWidth: "800px", opacity: 0.8 }}}}>
-        </p>
-      </div>
-    </section>
-  );
-}}
-"""
-        elif name == "Projects":
-            code = f"""import React from "react";
-import ProjectCard from "./ProjectCard";
-import {{ projects }} from "../data/projects";
-
-type ProjectsProps = {{
-  className?: string;
-}};
-
-export default function Projects({{
-  className = "",
-}}: ProjectsProps) {{
-  return (
-    <section className={{"{class_name} " + className}} id="work">
-      <div className="section-header">
-        <h2 style={{{{ fontFamily: "var(--font-display)", fontSize: "var(--type-heading-size, clamp(32px, 5vw, 64px))", fontWeight: "var(--type-heading-weight, 700)", lineHeight: "var(--type-heading-line-height, 1.15)" }}}}>Projects</h2>
-      </div>
-      <div className="projects-grid" style={{{{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "32px" }}}}>
-        {{projects.map((project, index) => (
-          <ProjectCard key={{index}} project={{project}} />
-        ))}}
-      </div>
-    </section>
-  );
-}}
-"""
         else:
+            # Generic fallback — no fabricated content
             code = f"""import React from "react";
 
 type {name}Props = {{
@@ -1480,20 +1356,7 @@ export default function LiveClock({ initialTime = "" }: { initialTime?: string }
         if pages:
             page_components = pages[0].get("components", [])
 
-        if not page_components:
-            page_components = [
-                "HeaderNavigation",
-                "Hero",
-                "Intro",
-                "Projects",
-                "About",
-                "Capabilities",
-                "VoiceOfMS",
-                "Journey",
-                "Toolkit",
-                "CTA",
-                "Footer",
-            ]
+        # No hardcoded fallback — only emit what was actually found in DOM
 
         imports = []
         rendered = []
@@ -1556,57 +1419,37 @@ export default function LiveClock({ initialTime = "" }: { initialTime?: string }
             self._text(
                 "app/contact/page.tsx",
                 f"""import React from "react";
-import HeaderNavigation from "../../components/HeaderNavigation";
-import Footer from "../../components/Footer";
 
 export default function ContactPage() {{
   return (
     <main>
-{jsx_body}
-    </main>
+{jsx_body}    </main>
   );
 }}
 """,
             )
             return
 
+        # Fallback: route was not captured — emit notice, not fabricated content
+        title = self._title_from_slug("contact")
         self._text(
             "app/contact/page.tsx",
-            """import React from "react";
-import HeaderNavigation from "../../components/HeaderNavigation";
-import Footer from "../../components/Footer";
+            f"""import React from "react";
 
-export default function ContactPage() {
+export default function ContactPage() {{
   return (
     <main>
-      <HeaderNavigation />
-      <section style={{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "60vh" }}>
-        <p style={{ fontFamily: "var(--font-mono, monospace)", fontSize: "14px", letterSpacing: "0.1em", opacity: 0.7, marginBottom: "16px" }}>// CONTACT</p>
-        <h1 style={{ fontFamily: "var(--font-display)", fontSize: "clamp(48px, 8vw, 96px)", fontWeight: 700, lineHeight: 1, margin: "0 0 32px 0" }}>
-          Contact
+      <section style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "60vh" }}}}>
+        <h1 style={{{{ fontFamily: "var(--font-display)", fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 700 }}}}>
+          {title}
         </h1>
-        <p style={{ fontFamily: "var(--font-body)", fontSize: "20px", maxWidth: "600px", opacity: 0.8, lineHeight: 1.6, marginBottom: "48px" }}>
-          Get in touch or submit an inquiry.
+        <p style={{{{ opacity: 0.6, marginTop: "16px" }}}}>
+          This page was not captured during site extraction.
         </p>
-        <div style={{ display: "flex", gap: "24px", flexWrap: "wrap", marginBottom: "64px" }}>
-          <a
-            href="mailto:contact@example.com"
-            style={{ display: "inline-flex", alignItems: "center", padding: "16px 32px", borderRadius: "9999px", background: "var(--color-foreground, #ffffff)", color: "var(--color-background, #0a0a0a)", fontWeight: 600, textDecoration: "none" }}
-          >
-            Get in Touch
-          </a>
-          <a
-            href="/"
-            style={{ display: "inline-flex", alignItems: "center", padding: "16px 32px", borderRadius: "9999px", border: "1px solid rgba(255,255,255,0.2)", color: "inherit", textDecoration: "none" }}
-          >
-            ← Back to Overview
-          </a>
-        </div>
       </section>
-      <Footer />
     </main>
   );
-}
+}}
 """,
         )
 
@@ -1805,7 +1648,6 @@ export default function WorkPage() {{
         title = self._title_from_slug(segment.split("/")[-1])
         pages = self.ir.get("pages", [])
         matched = next((p for p in pages if p.get("route") == route or p.get("route") == f"/{segment}"), None)
-        comp_rel = self._rel_components_path(segment)
         comp_name = "".join(w.capitalize() for w in re.split(r"[^a-zA-Z0-9]", segment)) + "Page"
 
         if matched and matched.get("dom"):
@@ -1813,33 +1655,33 @@ export default function WorkPage() {{
             self._text(
                 f"app/{segment}/page.tsx",
                 f"""import React from "react";
-import HeaderNavigation from "{comp_rel}/HeaderNavigation";
-import Footer from "{comp_rel}/Footer";
 
 export default function {comp_name}() {{
   return (
     <main>
-{jsx_body}
-    </main>
+{jsx_body}    </main>
   );
 }}
 """,
             )
             return
 
+        # Fallback: route was not captured — emit notice, not fabricated content
         self._text(
             f"app/{segment}/page.tsx",
-            f"""import HeaderNavigation from "{comp_rel}/HeaderNavigation";
-import Footer from "{comp_rel}/Footer";
+            f"""import React from "react";
 
 export default function {comp_name}() {{
   return (
     <main>
-      <HeaderNavigation />
-      <section className="page-section" style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "60vh" }}}}>
-        <h1 style={{{{ fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 800 }}}}>{title}</h1>
+      <section style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "60vh" }}}}>
+        <h1 style={{{{ fontFamily: "var(--font-display)", fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 700 }}}}>
+          {title}
+        </h1>
+        <p style={{{{ opacity: 0.6, marginTop: "16px" }}}}>
+          This page was not captured during site extraction.
+        </p>
       </section>
-      <Footer />
     </main>
   );
 }}
