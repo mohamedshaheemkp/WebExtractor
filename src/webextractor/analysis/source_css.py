@@ -109,109 +109,139 @@ def extract_relevant_css(
         css_sources.append(external_css)
 
     combined_css = "\n".join(css_sources)
-    if not combined_css.strip():
-        return {"font_faces": [], "class_rules": [], "media_rules": []}
-
-    # 2. Extract @font-face rules
     font_face_blocks: list[str] = []
-    target_families = set()
-    if font_families:
-        for f in font_families:
-            target_families.add(f.lower().strip("\"'"))
+    relevant_class_rules: list[str] = []
+    relevant_media_rules: list[str] = []
+    keyframes_rules: list[str] = []
 
-    for match in re.finditer(r"@font-face\s*\{([^}]+)\}", combined_css, re.IGNORECASE):
-        block = match.group(0).strip()
-        body = match.group(1)
-        if target_families:
-            fam_match = re.search(r"font-family\s*:\s*([^;]+);", body, re.IGNORECASE)
-            if fam_match:
-                fam_val = fam_match.group(1).lower().strip("\"' \t\r\n")
-                if any(tf in fam_val for tf in target_families):
+    if combined_css.strip():
+        target_families = set()
+        if font_families:
+            for f in font_families:
+                target_families.add(f.lower().strip("\"'"))
+
+        for match in re.finditer(r"@font-face\s*\{([^}]+)\}", combined_css, re.IGNORECASE):
+            block = match.group(0).strip()
+            body = match.group(1)
+            if target_families:
+                fam_match = re.search(r"font-family\s*:\s*([^;]+);", body, re.IGNORECASE)
+                if fam_match:
+                    fam_val = fam_match.group(1).lower().strip("\"' \t\r\n")
+                    if any(tf in fam_val for tf in target_families):
+                        font_face_blocks.append(block)
+                else:
                     font_face_blocks.append(block)
             else:
                 font_face_blocks.append(block)
-        else:
-            font_face_blocks.append(block)
 
-    # 3. Remove comments safely preserving strings
-    clean_chars = []
-    i = 0
-    length = len(combined_css)
-    in_str = None
-    while i < length:
-        c = combined_css[i]
-        if in_str:
-            clean_chars.append(c)
-            if c == "\\":
-                if i + 1 < length:
-                    clean_chars.append(combined_css[i + 1])
-                    i += 2
-                    continue
-            elif c == in_str:
-                in_str = None
-            i += 1
-        else:
-            if c == "/" and i + 1 < length and combined_css[i + 1] == "*":
-                end_comment = combined_css.find("*/", i + 2)
-                if end_comment == -1:
-                    break
-                i = end_comment + 2
-                continue
-            elif c in ('"', "'"):
-                in_str = c
+        # 3. Remove comments safely preserving strings
+        clean_chars = []
+        i = 0
+        length = len(combined_css)
+        in_str = None
+        while i < length:
+            c = combined_css[i]
+            if in_str:
                 clean_chars.append(c)
+                if c == "\\":
+                    if i + 1 < length:
+                        clean_chars.append(combined_css[i + 1])
+                        i += 2
+                        continue
+                elif c == in_str:
+                    in_str = None
                 i += 1
             else:
-                clean_chars.append(c)
-                i += 1
+                if c == "/" and i + 1 < length and combined_css[i + 1] == "*":
+                    end_comment = combined_css.find("*/", i + 2)
+                    if end_comment == -1:
+                        break
+                    i = end_comment + 2
+                    continue
+                elif c in ('"', "'"):
+                    in_str = c
+                    clean_chars.append(c)
+                    i += 1
+                else:
+                    clean_chars.append(c)
+                    i += 1
 
-    clean_css = "".join(clean_chars)
+        clean_css = "".join(clean_chars)
 
-    # 4. Parse statements into top-level rules and grouping at-rules
-    top_level_rules, at_blocks = _parse_css_blocks(clean_css)
+        # 4. Parse statements into top-level rules and grouping at-rules
+        top_level_rules, at_blocks = _parse_css_blocks(clean_css)
 
-    def selector_matches_classes(sel: str) -> bool:
-        classes_in_sel = re.findall(r"\.([a-zA-Z0-9_\-]+)", sel)
-        for c in classes_in_sel:
-            if c in referenced_classes:
-                return True
-        return False
+        def selector_matches_classes(sel: str) -> bool:
+            classes_in_sel = re.findall(r"\.([a-zA-Z0-9_\-]+)", sel)
+            for c in classes_in_sel:
+                if c in referenced_classes:
+                    return True
+            return False
 
-    relevant_class_rules: list[str] = []
-    seen_rules = set()
+        seen_rules = set()
 
-    for sel, body in top_level_rules:
-        sub_selectors = [s.strip() for s in sel.split(",")]
-        matching_sub = [s.strip("}; \r\n\t") for s in sub_selectors if selector_matches_classes(s)]
-        matching_sub = [s for s in matching_sub if s and "{" not in s and "}" not in s]
-        if matching_sub:
-            final_sel = ", ".join(matching_sub)
-            rule_str = f"{final_sel} {{\n  {body}\n}}"
-            if rule_str not in seen_rules:
-                seen_rules.add(rule_str)
-                relevant_class_rules.append(rule_str)
-
-    # 5. Filter @media rules using the same block parser
-    relevant_media_rules: list[str] = []
-    for media_hdr, inner_css in at_blocks:
-        if not media_hdr.startswith("@media"):
-            continue
-        inner_rules, _ = _parse_css_blocks(inner_css)
-        formatted_inner: list[str] = []
-        for sel, body in inner_rules:
+        for sel, body in top_level_rules:
             sub_selectors = [s.strip() for s in sel.split(",")]
             matching_sub = [s.strip("}; \r\n\t") for s in sub_selectors if selector_matches_classes(s)]
             matching_sub = [s for s in matching_sub if s and "{" not in s and "}" not in s]
             if matching_sub:
                 final_sel = ", ".join(matching_sub)
-                formatted_inner.append(f"  {final_sel} {{\n    {body}\n  }}")
+                rule_str = f"{final_sel} {{\n  {body}\n}}"
+                if rule_str not in seen_rules:
+                    seen_rules.add(rule_str)
+                    relevant_class_rules.append(rule_str)
 
-        if formatted_inner:
-            media_rule_str = f"{media_hdr} {{\n" + "\n".join(formatted_inner) + "\n}"
-            relevant_media_rules.append(media_rule_str)
+        # 5. Filter @media rules and extract @keyframes blocks using the block parser
+        for at_hdr, inner_css in at_blocks:
+            if at_hdr.startswith("@media"):
+                inner_rules, _ = _parse_css_blocks(inner_css)
+                formatted_inner: list[str] = []
+                for sel, body in inner_rules:
+                    sub_selectors = [s.strip() for s in sel.split(",")]
+                    matching_sub = [s.strip("}; \r\n\t") for s in sub_selectors if selector_matches_classes(s)]
+                    matching_sub = [s for s in matching_sub if s and "{" not in s and "}" not in s]
+                    if matching_sub:
+                        final_sel = ", ".join(matching_sub)
+                        formatted_inner.append(f"  {final_sel} {{\n    {body}\n  }}")
+
+                if formatted_inner:
+                    media_rule_str = f"{at_hdr} {{\n" + "\n".join(formatted_inner) + "\n}"
+                    relevant_media_rules.append(media_rule_str)
+
+            elif at_hdr.startswith("@keyframes") or at_hdr.startswith("@-webkit-keyframes"):
+                keyframes_rules.append(f"{at_hdr} {{\n{inner_css}\n}}")
+
+    # 6. Extract responsive visibility rules for breakpoint variants (e.g. .hidden-{hash})
+    if html_content:
+        import json as _json
+        patterns = [
+            r'(?:&quot;|"|\')?breakpoints(?:&quot;|"|\')?\s*(?::|=>|=)\s*(\[[^\]]+\])',
+            r'<script[^>]*>\s*(\[[^\]]*?"hash"[^\]]*?\])\s*</script>',
+            r'(\[\s*\{[^{}]*?"hash"[^{}]*?\}\s*(?:,\s*\{[^{}]*?"hash"[^{}]*?\}\s*)*\])',
+        ]
+        candidate_blocks = []
+        for pat in patterns:
+            candidate_blocks.extend(re.findall(pat, html_content, re.IGNORECASE | re.DOTALL))
+
+        for h_json in candidate_blocks:
+            clean = h_json.replace("&quot;", '"').replace("&#34;", '"').strip()
+            try:
+                bps = _json.loads(clean)
+                if isinstance(bps, list):
+                    for bp in bps:
+                        if isinstance(bp, dict):
+                            b_hash = bp.get("hash")
+                            m_query = bp.get("mediaQuery") or bp.get("media")
+                            if b_hash and m_query:
+                                media_rule = f"@media {m_query} {{\n  .hidden-{b_hash} {{\n    display: none !important;\n  }}\n}}"
+                                if media_rule not in relevant_media_rules:
+                                    relevant_media_rules.append(media_rule)
+            except Exception:
+                pass
 
     return {
         "font_faces": font_face_blocks,
         "class_rules": relevant_class_rules,
         "media_rules": relevant_media_rules,
+        "keyframes": keyframes_rules,
     }

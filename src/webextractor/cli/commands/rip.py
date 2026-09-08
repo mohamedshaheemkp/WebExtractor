@@ -163,6 +163,7 @@ async def execute_rip(target: str, output_dir: Path | None = None) -> None:
         typography=getattr(site_model, "typography", {}),
         layout=getattr(site_model, "layout", {}),
         raw_tokens=site_model.tokens,
+        animations=getattr(site_model, "animations", {}),
     )
 
     site_ir.save(dest_dir / "analysis")

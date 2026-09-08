@@ -147,37 +147,44 @@ class SiteAnalyzer:
             css_content=capture.get("css", ""),
         )
 
-        # Extract projects from work routes/links if present in HTML
+        # Extract collection items (projects, posts, products) from structured sub-routes/links in HTML
         if html:
             try:
                 from bs4 import BeautifulSoup
-                soup_proj = BeautifulSoup(html, "html.parser")
-                work_projects = []
-                for a in soup_proj.find_all("a"):
+                import re
+                soup_links = BeautifulSoup(html, "html.parser")
+                discovered_items = []
+                content_prefix_pattern = re.compile(
+                    r"/(work|projects|portfolio|case-studies|case-study|blog|posts|articles|products|services)/([^/#?]+)/?$",
+                    re.IGNORECASE,
+                )
+
+                for a in soup_links.find_all("a"):
                     href = a.get("href", "")
-                    if "/work/" in href:
-                        slug = href.rstrip("/").split("/")[-1]
+                    match = content_prefix_pattern.search(href)
+                    if match:
+                        slug = match.group(2).strip()
                         title_elem = a.find(["h1", "h2", "h3", "h4", "h5", "h6"])
                         p_elems = a.find_all("p")
                         title = title_elem.get_text(strip=True) if title_elem else ""
                         cat = p_elems[0].get_text(strip=True) if p_elems else ""
                         if not title:
                             parts = a.get_text("|", strip=True).split("|")
-                            title = parts[0].strip() if parts else slug
+                            title = parts[0].strip() if parts else slug.replace("-", " ").title()
                             cat = parts[1].strip() if len(parts) > 1 else ""
                         img = a.find("img")
                         img_src = img.get("src") if img else None
-                        if title and not any(p.get("slug") == slug for p in work_projects):
-                            work_projects.append({
+                        if title and not any(p.get("slug") == slug for p in discovered_items):
+                            discovered_items.append({
                                 "slug": slug,
                                 "title": title,
-                                "category": cat,
+                                "category": cat or "Featured",
                                 "description": f"{title} — {cat}" if cat else title,
                                 "image": img_src,
                                 "tags": [cat] if cat else ["Featured"],
                             })
-                if work_projects:
-                    data["projects"] = work_projects
+                if discovered_items:
+                    data["projects"] = discovered_items
             except Exception:
                 pass
 
@@ -192,24 +199,48 @@ class SiteAnalyzer:
             elif not proj.get("image"):
                 proj["image"] = None
 
-        pages = [
-            {
-                "route": "/",
-                "components": page_components,
-            }
-        ]
-
-        # Add any discovered sub-pages
-        for r in routes:
-            if r not in ("/", "") and not r.startswith("http"):
-                pages.append({
-                    "route": r if r.startswith("/") else f"/{r}",
-                    "components": [
-                        {"name": "HeaderNavigation", "type": "section"},
-                        {"name": "MainContent", "type": "section"},
-                        {"name": "Footer", "type": "section"},
-                    ],
-                })
+        captured_pages = capture.get("pages", [])
+        if captured_pages:
+            pages = []
+            for cp in captured_pages:
+                cp_route = cp.get("route", "/")
+                cp_dom = cp.get("dom")
+                if cp_route == "/":
+                    pages.append({
+                        "route": "/",
+                        "title": cp.get("title") or dom.get("title", "Home"),
+                        "components": page_components,
+                        "dom": cp_dom or rendered_dom,
+                    })
+                else:
+                    pages.append({
+                        "route": cp_route,
+                        "title": cp.get("title", ""),
+                        "dom": cp_dom,
+                        "components": [
+                            {"name": "HeaderNavigation", "type": "section"},
+                            {"name": "MainContent", "type": "section"},
+                            {"name": "Footer", "type": "section"},
+                        ],
+                    })
+        else:
+            pages = [
+                {
+                    "route": "/",
+                    "components": page_components,
+                    "dom": rendered_dom,
+                }
+            ]
+            for r in routes:
+                if r not in ("/", "") and not r.startswith("http"):
+                    pages.append({
+                        "route": r if r.startswith("/") else f"/{r}",
+                        "components": [
+                            {"name": "HeaderNavigation", "type": "section"},
+                            {"name": "MainContent", "type": "section"},
+                            {"name": "Footer", "type": "section"},
+                        ],
+                    })
 
         assets_data: Any = (
             [a.model_dump() if hasattr(a, "model_dump") else a for a in assets]
@@ -253,6 +284,40 @@ class SiteAnalyzer:
         rendered_dom: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
         """Infers top-level page components with child relationships in logical rendering order."""
+        if rendered_dom:
+            from webextractor.generator.dom_emitter import DomToJsxEmitter
+            content_root, sections = DomToJsxEmitter.decompose_content_sections(rendered_dom)
+            if sections:
+                result = []
+                for idx, sec in enumerate(sections):
+                    tag = (sec.get("tag") or "").lower()
+                    sec_type = "header" if (idx == 0 and tag in ("header", "nav", "div")) else (
+                        "footer" if (idx == len(sections) - 1 and tag in ("footer", "div")) else "section"
+                    )
+                    item: dict[str, Any] = {
+                        "name": sec["name"],
+                        "type": sec_type,
+                        "tag": sec["tag"],
+                    }
+                    s_lower = sec["name"].lower()
+                    if s_lower in ("portfolio", "projects"):
+                        item["children"] = ["ProjectCard"]
+                        item["data_key"] = "projects"
+                    elif s_lower in ("services", "capabilities"):
+                        item["children"] = ["CapabilityItem"]
+                        item["data_key"] = "capabilities"
+                    elif s_lower in ("experience", "journey"):
+                        item["children"] = ["JourneyItem"]
+                        item["data_key"] = "journey"
+                    elif s_lower in ("stacktools", "toolsandframeworks", "toolkit"):
+                        item["children"] = ["ToolkitItem"]
+                        item["data_key"] = "toolkit"
+                    elif sec_type == "header":
+                        item["children"] = ["NavItem"]
+
+                    result.append(item)
+                return result
+
         sections = dom.get("sections", [])
         headings = [h.get("text", "").lower() for h in dom.get("headings", [])]
         text_corpus = " ".join(s.get("text_preview", "") for s in sections).lower()

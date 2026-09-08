@@ -1,104 +1,66 @@
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
-from bs4 import BeautifulSoup
+from .motion_adapters.base import BaseMotionAdapter
+from .motion_adapters.framer import FramerMotionAdapter
+from .motion_adapters.standard import StandardCssMotionAdapter
 
 
 class AnimationExtractor:
     """
-    Extracts observable animation, transition, and interaction configurations
-    from captured HTML, embedded runtime metadata, and CSS.
+    Coordinates platform-specific motion adapters to extract and normalize
+    animation and interaction metadata from captured websites.
     """
 
-    @staticmethod
-    def extract_animations(
+    def __init__(self, adapters: list[BaseMotionAdapter] | None = None):
+        if adapters is None:
+            self.adapters = [
+                FramerMotionAdapter(),
+                StandardCssMotionAdapter(),
+            ]
+        else:
+            self.adapters = adapters
+
+    def analyze_motion(
+        self,
         html_content: str,
         css_content: str = "",
     ) -> dict[str, Any]:
-        appear_animations: dict[str, Any] = {}
-        keyframes: list[dict[str, Any]] = []
-        has_cursor = False
-        has_time_component = False
-        parallax_elements: list[str] = []
-
-        if not html_content:
-            return {
-                "appear_animations": appear_animations,
-                "keyframes": keyframes,
-                "has_cursor": has_cursor,
-                "has_time_component": has_time_component,
-                "parallax_elements": parallax_elements,
-            }
-
-        soup = BeautifulSoup(html_content, "html.parser")
-
-        # 1. Extract authoritative Framer appear animations from JSON script tags
-        for s in soup.find_all("script"):
-            txt = (s.string or "").strip()
-            if not txt:
-                continue
-
-            if "initial" in txt and "animate" in txt and txt.startswith("{"):
-                try:
-                    data = json.loads(txt)
-                    if isinstance(data, dict):
-                        for appear_id, config in data.items():
-                            if isinstance(config, dict):
-                                default_cfg = config.get("default", config)
-                                initial = default_cfg.get("initial", {})
-                                animate_target = default_cfg.get("animate", {})
-                                transition = animate_target.get("transition", {})
-
-                                # Clean animate target by separating transition
-                                clean_animate = {k: v for k, v in animate_target.items() if k != "transition"}
-
-                                appear_animations[appear_id] = {
-                                    "initial": initial,
-                                    "animate": clean_animate,
-                                    "transition": transition,
-                                    "variants": {k: v for k, v in config.items() if k != "default"} if "default" in config else {},
-                                }
-                except Exception:
-                    pass
-
-        # 2. Check for custom cursor follower
-        if soup.find(attrs={"data-framer-cursor": True}):
-            has_cursor = True
-
-        # 3. Check for dynamic clock component
-        for el in soup.find_all(attrs={"data-framer-name": True}):
-            name = el.get("data-framer-name", "")
-            if name in ("Time", "Time Component"):
-                has_time_component = True
-                break
-        if not has_time_component and ("LOCAL/" in html_content or "14:09:" in html_content):
-            has_time_component = True
-
-        # 4. Check for parallax elements
-        for el in soup.find_all(attrs={"data-framer-name": "Parallax Image"}):
-            appear_id = el.get("data-framer-appear-id")
-            if appear_id:
-                parallax_elements.append(f'[data-framer-appear-id="{appear_id}"]')
-            else:
-                classes = el.get("class", [])
-                if classes:
-                    parallax_elements.append("." + ".".join(classes[:2]))
-
-        # 5. Extract CSS keyframe animations
-        if css_content:
-            kf_matches = re.finditer(r"@keyframes\s+([a-zA-Z0-9_\-]+)\s*\{([^}]+)\}", css_content, re.IGNORECASE)
-            for m in kf_matches:
-                keyframes.append({
-                    "name": m.group(1),
-                    "body": m.group(2).strip(),
-                })
-
-        return {
-            "appear_animations": appear_animations,
-            "keyframes": keyframes,
-            "has_cursor": has_cursor,
-            "has_time_component": has_time_component,
-            "parallax_elements": parallax_elements,
+        merged: dict[str, Any] = {
+            "appear_animations": {},
+            "keyframes": [],
+            "has_cursor": False,
+            "has_time_component": False,
+            "parallax_elements": [],
+            "motion_triggers": [],
         }
+
+        for adapter in self.adapters:
+            if adapter.can_handle(html_content, css_content):
+                res = adapter.extract_motion(html_content, css_content)
+                merged["appear_animations"].update(res.get("appear_animations", {}))
+                merged["keyframes"].extend(res.get("keyframes", []))
+                if res.get("has_cursor"):
+                    merged["has_cursor"] = True
+                if res.get("has_time_component"):
+                    merged["has_time_component"] = True
+                merged["parallax_elements"].extend(res.get("parallax_elements", []))
+                merged["motion_triggers"].extend(res.get("motion_triggers", []))
+
+        # Deduplicate list elements preserving order
+        merged["parallax_elements"] = list(dict.fromkeys(merged["parallax_elements"]))
+        merged["keyframes"] = [
+            dict(t) for t in {tuple(sorted(d.items())) for d in merged["keyframes"]}
+        ]
+
+        return merged
+
+    @classmethod
+    def extract_animations(
+        cls,
+        html_content: str,
+        css_content: str = "",
+    ) -> dict[str, Any]:
+        """Backwards-compatible classmethod matching legacy signature."""
+        instance = cls()
+        return instance.analyze_motion(html_content, css_content)

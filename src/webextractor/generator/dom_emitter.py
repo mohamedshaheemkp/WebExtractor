@@ -117,41 +117,191 @@ class DomToJsxEmitter:
     }
 
     COMPONENT_KEYWORDS: dict[str, list[str]] = {
-        "HeaderNavigation": ["contact now", "local/", "nav", "header", "menu"],
-        "Hero": ["based in india", "available all around", "engineer & dev", "graphic designer", "hero"],
-        "Intro": ["01 //", "intro", "tools&frameworks", "combining design and ai"],
-        "Projects": ["02 //", "projects", "selected projects", "i build intelligent systems"],
-        "About": ["03 //", "who am i", "more about shaheem", "i build with code"],
-        "Capabilities": ["04 //", "capability", "improving self", "discover our range"],
-        "VoiceOfMS": ["05 //", "voice of ms", "curiosity, design with intent"],
-        "Journey": ["06 //", "journey", "2022 - present", "ai developer / designer"],
-        "Toolkit": ["07 //", "technical toolkit", "stack & tools"],
-        "CTA": ["let's build", "get in touch", "contact"],
-        "Footer": ["back to top", "mhd_shm", "©2026", "all rights reserved"],
+        "HeaderNavigation": ["nav", "header", "menu", "navigation"],
+        "Hero": ["hero", "headline", "welcome", "banner"],
+        "Intro": ["intro", "overview", "summary"],
+        "Projects": ["project", "selected projects", "portfolio", "case studies", "work"],
+        "About": ["about", "story", "team", "mission", "who we are", "who am i"],
+        "Capabilities": ["service", "capability", "capabilities", "features", "solutions"],
+        "VoiceOfMS": ["testimonials", "reviews", "quotes", "voice", "feedback"],
+        "Journey": ["journey", "timeline", "history", "experience", "milestones"],
+        "Toolkit": ["skills", "toolkit", "technologies", "stack", "tools"],
+        "CTA": ["cta", "contact", "get in touch", "let's talk", "let's build", "join"],
+        "Footer": ["footer", "copyright", "rights reserved", "back to top"],
     }
 
     def __init__(
         self,
         component_tree: dict[str, Any] | None = None,
         asset_bindings: list[dict[str, Any]] | None = None,
+        motion_targets: set[str] | dict[str, Any] | list[str] | None = None,
     ):
         self.tree = component_tree or {}
         self.asset_bindings = asset_bindings or []
         self._binding_index = 0
         self.ambiguities: list[str] = []
+        if isinstance(motion_targets, dict):
+            self.motion_targets = set(motion_targets.keys())
+        elif isinstance(motion_targets, set):
+            self.motion_targets = motion_targets
+        elif isinstance(motion_targets, list):
+            self.motion_targets = set(motion_targets)
+        else:
+            self.motion_targets = set()
+
+    @classmethod
+    def decompose_content_sections(
+        cls,
+        root_node: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """
+        Decomposes a rendered DOM tree structurally into:
+        (content_root, sections)
+        Where content_root is the outer layout wrapper (e.g. <main> or root <div>),
+        and sections are its direct children, strictly non-overlapping and disjoint.
+        """
+        if not root_node:
+            return None, []
+
+        def count_nodes(n: dict[str, Any]) -> int:
+            return 1 + sum(count_nodes(c) for c in n.get("children", []) if isinstance(c, dict))
+
+        curr = root_node
+        visual_children = [
+            c for c in curr.get("children", [])
+            if isinstance(c, dict) and c.get("tag") not in ("script", "style", "noscript", "link", "meta", "iframe")
+        ]
+
+        if (len(visual_children) == 1 and visual_children[0].get("tag") in ("div", "main")) or any(c.get("id") == "main" or c.get("tag") == "main" for c in visual_children):
+            main_c = next((c for c in visual_children if c.get("id") == "main" or c.get("tag") == "main"), visual_children[0])
+            curr = main_c
+
+        while curr:
+            if curr.get("tag") in ("section", "header", "footer", "nav", "article"):
+                break
+            children = [
+                c for c in curr.get("children", [])
+                if isinstance(c, dict) and c.get("tag") not in ("script", "style", "noscript", "link", "meta", "iframe")
+            ]
+            if not children:
+                break
+            if any(c.get("tag") in ("section", "header", "footer", "nav", "article") for c in children):
+                break
+            child_counts = [count_nodes(c) for c in children]
+            max_cnt = max(child_counts)
+            total_cnt = sum(child_counts)
+
+            if len(children) > 1 and max_cnt >= 0.75 * total_cnt:
+                dominant_idx = child_counts.index(max_cnt)
+                curr = children[dominant_idx]
+            elif len(children) == 1 and children[0].get("tag") in ("div", "main"):
+                curr = children[0]
+            else:
+                break
+
+        content_root = curr
+        raw_sections = [
+            c for c in content_root.get("children", [])
+            if isinstance(c, dict) and c.get("tag") not in ("script", "style", "noscript", "link", "meta")
+        ]
+
+        sections: list[dict[str, Any]] = []
+        used_names: set[str] = set()
+
+        for idx, s in enumerate(raw_sections):
+            attrs = s.get("attributes", {})
+            s_tag = (s.get("tag") or "").lower()
+            raw_id = str(s.get("id") or attrs.get("id") or "").lower()
+            classes = [str(c).lower() for c in s.get("classes", [])]
+
+            raw_name = (
+                attrs.get("data-framer-name")
+                or attrs.get("data-component-name")
+                or attrs.get("aria-label")
+            )
+            if not raw_name:
+                if raw_id == "voice":
+                    raw_name = "VoiceOfMS"
+                elif raw_id in ("contact", "cta"):
+                    raw_name = "CTA"
+                elif raw_id in ("nav", "header") or s_tag in ("header", "nav") or idx == 0:
+                    raw_name = "HeaderNavigation"
+                elif raw_id in ("footer",) or s_tag == "footer" or idx == len(raw_sections) - 1:
+                    raw_name = "Footer"
+                elif s.get("id"):
+                    raw_name = s.get("id")
+                elif any("hero" in c for c in classes) or (idx == 1 and len(raw_sections) > 2):
+                    raw_name = "Hero"
+                else:
+                    raw_name = f"Section_{idx + 1:02d}"
+
+            raw_str = str(raw_name)
+            if re.match(r"^[A-Za-z][A-Za-z0-9_]*$", raw_str):
+                clean = raw_str[0].upper() + raw_str[1:]
+            else:
+                clean = "".join(w.capitalize() for w in re.split(r"[^a-zA-Z0-9]+", raw_str) if w)
+
+            if not clean or clean[0].isdigit():
+                clean = f"Section_{clean}"
+            RESERVED_NAMES = {"Image", "Script", "Head", "Link", "Document", "Window", "Style"}
+            if clean in RESERVED_NAMES:
+                clean = f"Section{clean}"
+
+            base = clean
+            counter = 1
+            while clean in used_names:
+                clean = f"{base}_{counter}"
+                counter += 1
+            used_names.add(clean)
+
+            sections.append({
+                "name": clean,
+                "tag": s.get("tag", "div"),
+                "node": s,
+                "nodes_count": count_nodes(s),
+            })
+
+        return content_root, sections
 
     def find_node_for_component(self, name: str) -> dict[str, Any] | None:
         """
-        Locates the best-matching DOM node for a component in SiteIR.
-        Ordering:
-        1. Top-level section / container candidate in component tree
-        2. Semantic tag matching (<header>/<nav> for HeaderNavigation, <footer> for Footer)
-        3. Structural container scoring with keyword matching
+        Locates the authoritative DOM node for a component using structural partitioning.
+        Strict invariant: An ancestor node containing the whole page can NEVER be returned
+        as a sub-component, preventing parent-child duplication.
         """
         if not self.tree:
             return None
 
-        keywords = self.COMPONENT_KEYWORDS.get(name, [name.lower()])
+        content_root, sections = self.decompose_content_sections(self.tree)
+        name_lower = name.lower()
+
+        # 1. Match against direct top-level structural sections first
+        if sections:
+            # 1a. Exact name match (e.g. "Hero", "About", "Portfolio", "SectionImage")
+            for sec in sections:
+                if sec["name"].lower() == name_lower:
+                    return sec["node"]
+
+            # 1b. Match by keywords against section name and attributes
+            keywords = self.COMPONENT_KEYWORDS.get(name, [name_lower])
+            for idx, sec in enumerate(sections):
+                s_node = sec["node"]
+                s_name = sec["name"].lower()
+                s_tag = (s_node.get("tag") or "").lower()
+                s_attrs = s_node.get("attributes", {})
+                raw_name = str(s_attrs.get("data-framer-name") or s_attrs.get("name") or s_attrs.get("aria-label") or s_node.get("id") or "").lower()
+
+                if name_lower in ("headernavigation", "header", "nav") and (s_tag in ("header", "nav") or s_node.get("id") == "nav" or "nav" in s_name or idx == 0):
+                    return s_node
+                if name_lower in ("footer",) and (s_tag == "footer" or "footer" in s_name or (idx == len(sections) - 1 and idx > 0)):
+                    return s_node
+
+                for kw in keywords:
+                    if kw in s_name or (raw_name and kw in raw_name):
+                        return s_node
+
+        # 2. Structural leaf search: strictly reject ancestor wrappers that have child sections
+        keywords = self.COMPONENT_KEYWORDS.get(name, [name_lower])
         scored_candidates: list[tuple[int, int, int, dict[str, Any]]] = []
 
         def _get_node_text(node: dict[str, Any]) -> str:
@@ -165,8 +315,20 @@ class DomToJsxEmitter:
             classes = [str(c).lower() for c in n.get("classes", [])]
             node_id = str(n.get("id") or "").lower()
 
-            # Never match root body as a sub-component
-            if tag == "body" or depth == 0:
+            if tag == "body" or depth == 0 or n is content_root:
+                for ch in n.get("children", []):
+                    _score_tree(ch, depth + 1)
+                return
+
+            # Never allow a container with multiple child sections to be matched as a single leaf section
+            child_sections = [
+                c for c in n.get("children", [])
+                if isinstance(c, dict) and (
+                    (c.get("tag") or "").lower() in ("section", "header", "footer", "nav", "article")
+                    or any(str(cl).endswith("-container") for cl in c.get("classes", []))
+                )
+            ]
+            if len(child_sections) > 1:
                 for ch in n.get("children", []):
                     _score_tree(ch, depth + 1)
                 return
@@ -181,11 +343,14 @@ class DomToJsxEmitter:
                     if kw in txt:
                         score += len(kw) * 4
 
-                n_name = (n.get("name") or "").lower()
+                n_attrs = n.get("attributes") or {}
+                n_name = (n.get("name") or n_attrs.get("data-framer-name") or n_attrs.get("aria-label") or "").lower()
                 if n_name == name.lower():
-                    score += 60
+                    score += 120
+                elif name.lower() in n_name:
+                    score += 80
 
-                if name.lower() in classes or name.lower() == node_id:
+                if any(name.lower() in c or c in name.lower() for c in classes) or (node_id and (name.lower() in node_id or node_id in name.lower())):
                     score += 50
 
                 if tag in ("header", "nav") and "Header" in name:
@@ -195,7 +360,6 @@ class DomToJsxEmitter:
                 elif tag == "section" and name not in ("HeaderNavigation", "Footer"):
                     score += 30
 
-                # Prefer shallower depth (closer to top-level sections)
                 depth_penalty = depth * 2
 
                 if score > 0:
@@ -208,10 +372,6 @@ class DomToJsxEmitter:
 
         if scored_candidates:
             scored_candidates.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
-            top_score = scored_candidates[0][0]
-            top_matches = [c for c in scored_candidates if c[0] == top_score]
-            if len(top_matches) > 1:
-                self.ambiguities.append(f"Multiple candidates tied with score {top_score} for {name}")
             return scored_candidates[0][3]
 
         return None
@@ -252,6 +412,27 @@ class DomToJsxEmitter:
 
         # Collect and normalize element attributes
         node_attrs = dict(node.get("attributes") or {})
+        node_classes = list(node.get("classes", []))
+        node_id = str(node.get("id") or "")
+
+        # Detect motion-governed element
+        motion_id = None
+        if "data-motion-id" in node_attrs:
+            motion_id = str(node_attrs["data-motion-id"])
+        elif "data-framer-appear-id" in node_attrs:
+            motion_id = str(node_attrs["data-framer-appear-id"])
+        elif node_id and node_id in self.motion_targets:
+            motion_id = node_id
+        else:
+            for c in node_classes:
+                if c in self.motion_targets or f".{c}" in self.motion_targets or f"motion-{c}" in self.motion_targets:
+                    motion_id = c
+                    break
+
+        is_motion_element = motion_id is not None
+        if is_motion_element and "data-motion-id" not in node_attrs:
+            node_attrs["data-motion-id"] = motion_id
+
         if tag == "foreignObject":
             if "width" not in node_attrs:
                 node_attrs["width"] = "100%"
@@ -273,7 +454,7 @@ class DomToJsxEmitter:
             if ak_lower == "id" and is_root and root_id:
                 continue
             if ak_lower == "style":
-                style_jsx = self._parse_style_attribute(av_str)
+                style_jsx = self._parse_style_attribute(av_str, is_motion_element=is_motion_element)
                 continue
             if ak_lower == "src" and tag in ("img", "video"):
                 continue
@@ -365,7 +546,7 @@ class DomToJsxEmitter:
 
         return f"{indent}<{tag}{tag_attrs}>\n{inner}{indent}</{tag}>\n"
 
-    def _parse_style_attribute(self, style_str: str) -> str:
+    def _parse_style_attribute(self, style_str: str, is_motion_element: bool = False) -> str:
         """Parses an inline CSS style string into a valid React style={{ ... }} attribute."""
         if not style_str or not style_str.strip():
             return ""
@@ -379,6 +560,28 @@ class DomToJsxEmitter:
             v = v.strip().replace('"', '\\"')
             if not k or not v:
                 continue
+
+            # Transient motion normalization:
+            # If element is represented by SiteIR motion, suppress transient initial animation values
+            k_lower = k.lower()
+            if is_motion_element:
+                if k_lower == "opacity":
+                    try:
+                        op_val = float(v)
+                        if op_val <= 0.05:
+                            # Suppress transient initial hidden opacity
+                            continue
+                    except ValueError:
+                        pass
+                elif k_lower == "will-change":
+                    if any(w in v.lower() for w in ("transform", "opacity")):
+                        continue
+                elif k_lower == "transform":
+                    # Keep legitimate static transforms like translate(-50%, -50%) or rotate
+                    is_static_center = "translate(-50%" in v or "translate3d(-50%" in v or v in ("none", "initial")
+                    if not is_static_center and any(m in v.lower() for m in ("translatey", "translate3d", "scale", "matrix")):
+                        continue
+
             if k.startswith("--"):
                 entries.append(f'"{k}": "{v}"')
             else:
@@ -392,29 +595,58 @@ class DomToJsxEmitter:
     def extract_projects(self) -> list[dict[str, Any]]:
         """
         Extracts structured project card data from the Projects section if present.
-        Returns list of {title, category, image, href}.
+        Extracts cards structurally from DOM nodes without hardcoded portfolio assumptions.
+        Returns list of {title, description, tags, image}.
         """
         proj_node = self.find_node_for_component("Projects")
         if not proj_node:
             return []
 
         projects: list[dict[str, Any]] = []
-        known_titles = [
-            ("AgriAi", "AI / MACHINE LEARNING"),
-            ("Smart Folder Organiser", "PYTHON / AUTOMATION"),
-            ("MS Portfolio", "CREATIVE DEVELOPMENT"),
-            ("Revoro Mods", "MARKETPLACE"),
-            ("Royal Gryphon", "MOTION / VISUAL DESIGN"),
-        ]
 
-        txt_all = proj_node.get("text", "")
-        for title, cat in known_titles:
-            if title.lower() in txt_all.lower():
+        def _find_card_candidates(n: dict[str, Any]) -> list[dict[str, Any]]:
+            candidates = []
+            for ch in n.get("children", []):
+                tag = (ch.get("tag") or "").lower()
+                classes = [str(c).lower() for c in ch.get("classes", [])]
+                if tag in ("article", "a") or any("card" in c or "project" in c or "item" in c for c in classes):
+                    candidates.append(ch)
+                else:
+                    candidates.extend(_find_card_candidates(ch))
+            return candidates
+
+        cards = _find_card_candidates(proj_node)
+
+        for card in cards:
+            title = ""
+            cat = ""
+            img_src = None
+
+            def _inspect_node(el: dict[str, Any]):
+                nonlocal title, cat, img_src
+                el_tag = (el.get("tag") or "").lower()
+                el_txt = (el.get("text") or "").strip()
+
+                if el_tag in ("h1", "h2", "h3", "h4", "h5", "h6") and not title and el_txt:
+                    title = el_txt
+                elif el_tag == "img" and not img_src:
+                    img_src = el.get("src") or el.get("attributes", {}).get("src")
+                elif el_txt and not title and len(el_txt) < 80:
+                    title = el_txt
+                elif el_txt and not cat and len(el_txt) < 40 and el_txt != title:
+                    cat = el_txt
+
+                for sub in el.get("children", []):
+                    _inspect_node(sub)
+
+            _inspect_node(card)
+
+            if title and not any(p["title"].lower() == title.lower() for p in projects):
                 projects.append({
                     "title": title,
-                    "description": cat,
-                    "tags": [cat],
-                    "image": self._resolve_image_src({}),
+                    "description": cat or "Featured",
+                    "tags": [cat] if cat else ["Featured"],
+                    "image": img_src or self._resolve_image_src({}),
                 })
 
         return projects
@@ -431,12 +663,22 @@ class DomToJsxEmitter:
         return False
 
     def _resolve_image_src(self, node: dict[str, Any]) -> str | None:
-        """Resolves real downloaded local path for img elements from asset_bindings."""
-        raw_src = node.get("src")
+        """Resolves real downloaded local path for img elements from asset_bindings or node attributes."""
+        raw_src = node.get("src") or node.get("attributes", {}).get("src")
+        if not raw_src:
+            attrs = node.get("attributes", {})
+            srcset = attrs.get("srcset") or attrs.get("srcSet")
+            if srcset and isinstance(srcset, str):
+                first_cand = srcset.strip().split(",")[0].strip().split(" ")[0].strip()
+                if first_cand:
+                    raw_src = first_cand
+
         if raw_src and isinstance(raw_src, str):
             for b in self.asset_bindings:
                 if b.get("local_path") and (b.get("source_url") == raw_src or b.get("local_path") == raw_src):
                     return b["local_path"]
+            if raw_src.startswith("/") or raw_src.startswith("http://") or raw_src.startswith("https://") or raw_src.startswith("data:"):
+                return raw_src
 
         img_bindings = [
             b["local_path"] for b in self.asset_bindings
@@ -447,7 +689,7 @@ class DomToJsxEmitter:
             self._binding_index += 1
             return resolved
 
-        return None
+        return raw_src if isinstance(raw_src, str) else None
 
     def _resolve_video_src(self, node: dict[str, Any]) -> str | None:
         """Resolves real video source from asset_bindings."""

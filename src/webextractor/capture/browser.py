@@ -53,6 +53,7 @@ class BrowserCapture:
     async def capture(
         self,
         url: str,
+        screenshot_name: str | None = None,
     ) -> dict[str, Any]:
 
         if self.context is None:
@@ -73,50 +74,69 @@ class BrowserCapture:
             ),
         )
 
-        await page.goto(
-            url,
-            wait_until="domcontentloaded",
-            timeout=60_000,
-        )
+        try:
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
 
-        # Give client-side applications time to render.
-        await page.wait_for_timeout(3000)
+            # Give client-side applications time to render.
+            await page.wait_for_timeout(3000)
 
-        # Trigger lazy-loaded content.
-        await self._scroll_page(page)
+            # Trigger lazy-loaded content.
+            await self._scroll_page(page)
 
-        await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(1500)
 
-        title = await page.title()
+            title = await page.title()
 
-        html = await page.content()
+            html = await page.content()
 
-        screenshot_path = (
-            self.output_dir / "screenshots" / "desktop.png"
-        )
+            shot_name = screenshot_name or "desktop.png"
+            screenshot_path = (
+                self.output_dir / "screenshots" / shot_name
+            )
 
-        screenshot_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+            screenshot_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
-        await page.screenshot(
-            path=str(screenshot_path),
-            full_page=True,
-        )
+            await page.screenshot(
+                path=str(screenshot_path),
+                full_page=True,
+            )
 
-        dom_snapshot = await page.evaluate(
-            """
-            () => {
-                function extract(element, depth = 0) {
-                    if (!element || depth > 20) {
-                        return null;
-                    }
+            discovered_links = await page.evaluate(
+                """
+                () => {
+                    const links = new Set();
+                    document.querySelectorAll("a[href]").forEach(el => {
+                        const href = el.getAttribute("href");
+                        if (href) links.add(href.trim());
+                    });
+                    document.querySelectorAll("link[rel='canonical']").forEach(el => {
+                        const href = el.getAttribute("href");
+                        if (href) links.add(href.trim());
+                    });
+                    return Array.from(links);
+                }
+                """
+            )
 
-                    const rect = element.getBoundingClientRect();
-                    const style = window.getComputedStyle(element);
+            dom_snapshot = await page.evaluate(
+                """
+                () => {
+                    function extract(element, depth = 0) {
+                        if (!element || depth > 20) {
+                            return null;
+                        }
 
-                    const children = [];
+                        const rect = element.getBoundingClientRect();
+                        const style = window.getComputedStyle(element);
+
+                        const children = [];
 
                     for (const child of element.children) {
                         const result = extract(
@@ -238,6 +258,9 @@ class BrowserCapture:
             """
         )
 
+        finally:
+            await page.close()
+
         return {
             "url": page.url,
             "title": title,
@@ -245,6 +268,7 @@ class BrowserCapture:
             "dom": dom_snapshot,
             "requests": network_requests,
             "screenshot": str(screenshot_path),
+            "discovered_links": discovered_links or [],
             "viewport": {
                 "width": self.viewport_width,
                 "height": self.viewport_height,

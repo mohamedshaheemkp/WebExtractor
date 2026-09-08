@@ -683,11 +683,82 @@ class TestReactProjectGenerator(unittest.TestCase):
         self.assertIn("v9260z", layout_code)
 
         self.assertTrue((self.output_dir / "components/FramerAppearRuntime.tsx").exists())
+        self.assertTrue((self.output_dir / "components/MotionRuntime.tsx").exists())
         self.assertTrue((self.output_dir / "components/CursorFollower.tsx").exists())
+
+    def test_motion_adapter_isolation_and_generic_fallback(self):
+        """Test that motion adapters are isolated and generic non-Framer HTML extracts cleanly."""
+        from webextractor.analysis.motion_adapters.framer import FramerMotionAdapter
+        from webextractor.analysis.motion_adapters.standard import StandardCssMotionAdapter
+        from webextractor.analysis.animations import AnimationExtractor
+
+        framer_adapter = FramerMotionAdapter()
+        standard_adapter = StandardCssMotionAdapter()
+
+        # Non-Framer HTML
+        generic_html = """
+        <!DOCTYPE html>
+        <html>
+          <body>
+            <div data-aos="fade-up" data-aos-duration="600" class="hero-card">Welcome</div>
+            <span>12:30:45</span>
+          </body>
+        </html>
+        """
+        generic_css = """
+        @keyframes pulse {
+          0% { opacity: 0.5; }
+          100% { opacity: 1; }
+        }
+        """
+
+        # Verify adapter can_handle discrimination
+        self.assertFalse(framer_adapter.can_handle(generic_html, generic_css))
+        self.assertTrue(standard_adapter.can_handle(generic_html, generic_css))
+
+        # Extractor coordinator test
+        extracted = AnimationExtractor.extract_animations(generic_html, generic_css)
+        self.assertEqual(len(extracted["keyframes"]), 1)
+        self.assertEqual(extracted["keyframes"][0]["name"], "pulse")
+        self.assertTrue(extracted["has_time_component"])
+        self.assertEqual(len(extracted["appear_animations"]), 0)
+        self.assertTrue(any(t.get("trigger") == "in_view" for t in extracted.get("motion_triggers", [])))
+
+    def test_generic_collection_routes_and_no_portfolio_copy_leak(self):
+        """Test that contact page contains no hardcoded portfolio copy and collection items extract generically."""
+        generator = ReactProjectGenerator(
+            site_ir={
+                "metadata": {"title": "Generic Business Site"},
+                "routes": ["/", "/contact", "/products/analytics-pro"],
+                "pages": [{"name": "Home", "components": ["Hero"]}],
+                "data": {
+                    "projects": [
+                        {
+                            "slug": "analytics-pro",
+                            "title": "Analytics Pro",
+                            "category": "Enterprise Software",
+                            "description": "High-scale analytics engine.",
+                        }
+                    ]
+                },
+            },
+            output_dir=self.output_dir,
+        )
+        generator.generate()
+
+        contact_code = (self.output_dir / "app/contact/page.tsx").read_text(encoding="utf-8")
+        # Ensure hardcoded portfolio text does NOT leak
+        self.assertNotIn("LET'S BUILD TOGETHER", contact_code)
+        self.assertNotIn("Combining design engineering, machine learning", contact_code)
+        self.assertIn("Contact", contact_code)
+
+        # Product page exists and uses generic metadata
+        self.assertTrue((self.output_dir / "app/work/analytics-pro/page.tsx").exists())
 
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

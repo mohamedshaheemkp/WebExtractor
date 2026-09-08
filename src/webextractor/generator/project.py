@@ -31,9 +31,19 @@ class ReactProjectGenerator:
             self.ir = dict(site_ir)
 
         self.output = Path(output_dir)
+        animations = self.ir.get("animations", {})
+        appear_animations = animations.get("appear_animations", {})
+        motion_triggers = animations.get("motion_triggers", [])
+        motion_targets = set(appear_animations.keys())
+        for mt in motion_triggers:
+            sel = mt.get("target_selector")
+            if sel:
+                motion_targets.add(sel.lstrip(".#"))
+
         self.emitter = DomToJsxEmitter(
             component_tree=self.ir.get("components"),
             asset_bindings=self.ir.get("asset_bindings", []),
+            motion_targets=motion_targets,
         )
 
 
@@ -189,11 +199,12 @@ export default nextConfig;
         layout_imports = [
             'import "../styles/tokens.css";',
             'import "./globals.css";',
+            'import MotionRuntime from "../components/MotionRuntime";',
             'import FramerAppearRuntime from "../components/FramerAppearRuntime";',
         ]
         layout_elements = [
             "        {children}",
-            f"        <FramerAppearRuntime animations={{{json.dumps(appear_animations)}}} />",
+            f"        <MotionRuntime animations={{{json.dumps(animations)}}} />",
         ]
 
         if has_cursor:
@@ -536,14 +547,16 @@ export default function RootLayout({{
         if mobile_media_rules:
             media_block += "\n@media (max-width: 768px) {\n" + "\n\n".join(mobile_media_rules) + "\n}\n"
 
-        # Source-extracted rules (font-faces, relevant classes, media rules)
+        # Source-extracted rules (font-faces, relevant classes, media rules, keyframes)
         source_rules = self.ir.get("component_styles", {}).get("source_rules", {})
         font_faces = source_rules.get("font_faces", [])
         class_rules = source_rules.get("class_rules", [])
         source_media_rules = source_rules.get("media_rules", [])
+        keyframes = source_rules.get("keyframes", [])
 
         font_face_block = ("\n\n".join(font_faces) + "\n\n") if font_faces else ""
         source_class_block = ("\n\n/* Source Extracted Element Styles */\n" + "\n\n".join(class_rules)) if class_rules else ""
+        source_keyframes_block = ("\n\n/* Source Extracted Keyframes */\n" + "\n\n".join(keyframes)) if keyframes else ""
         source_media_block = ("\n\n/* Source Extracted Responsive Rules */\n" + "\n\n".join(source_media_rules)) if source_media_rules else ""
 
         css_content = font_face_block + """\
@@ -587,7 +600,7 @@ code, pre, kbd {
 }
 
 /* Component Classes */
-""" + "\n\n".join(style_rules) + source_class_block + media_block + source_media_block
+""" + "\n\n".join(style_rules) + source_class_block + source_keyframes_block + media_block + source_media_block
 
         self._text(
             "app/globals.css",
@@ -1023,25 +1036,40 @@ export default function {name}({{
         self._text(f"components/{name}.tsx", code)
 
     def _write_runtime_components(self):
-        # 1. FramerAppearRuntime.tsx
+        # 1. MotionRuntime.tsx (Generic native browser animation runtime)
         self._text(
-            "components/FramerAppearRuntime.tsx",
+            "components/MotionRuntime.tsx",
             """\"use client\";
 
 import { useEffect } from "react";
 
-export interface AppearConfig {
+export interface MotionConfig {
   initial?: Record<string, any>;
   animate?: Record<string, any>;
+  hover?: Record<string, any>;
+  press?: Record<string, any>;
   transition?: Record<string, any>;
+  variants?: Record<string, any>;
+  trigger?: "mount" | "in_view" | "hover" | "scroll" | string;
+  inView?: boolean;
+  once?: boolean;
+  threshold?: number;
+  keyframes?: Array<Record<string, any>>;
+  repeat?: number | "Infinity";
+  continuous?: boolean;
+  parallaxSpeed?: number;
   [key: string]: any;
 }
 
-export default function FramerAppearRuntime({
+export type AppearConfig = MotionConfig;
+
+export interface MotionRuntimeProps {
+  animations?: Record<string, any>;
+}
+
+export default function MotionRuntime({
   animations = {},
-}: {
-  animations?: Record<string, AppearConfig>;
-}) {
+}: MotionRuntimeProps) {
   useEffect(() => {
     if (!animations || Object.keys(animations).length === 0) return;
     if (typeof window === "undefined") return;
@@ -1050,57 +1078,266 @@ export default function FramerAppearRuntime({
       return;
     }
 
-    Object.entries(animations).forEach(([appearId, config]) => {
-      const el = document.querySelector(`[data-framer-appear-id="${appearId}"]`) as HTMLElement;
+    // Normalization: animations can be a map of configs or an object containing appear_animations, motion_triggers, etc.
+    const appearMap: Record<string, MotionConfig> = animations.appear_animations || (animations.initial ? {} : animations);
+    const triggers: Array<Record<string, any>> = animations.motion_triggers || [];
+    const parallaxList: string[] = animations.parallax_elements || [];
+
+    const cleanupFns: Array<() => void> = [];
+
+    // Helper: calculate transform string from config object
+    function getTransform(val: Record<string, any>): string {
+      const x = val.x !== undefined ? (typeof val.x === "number" ? `${val.x}px` : val.x) : "0px";
+      const y = val.y !== undefined ? (typeof val.y === "number" ? `${val.y}px` : val.y) : "0px";
+      const scale = val.scale !== undefined ? val.scale : 1;
+      const rotate = val.rotate !== undefined ? (typeof val.rotate === "number" ? `${val.rotate}deg` : val.rotate) : "0deg";
+      return `translate3d(${x}, ${y}, 0) scale(${scale}) rotate(${rotate})`;
+    }
+
+    // Helper: calculate duration from transition
+    function getDuration(transition: Record<string, any>): number {
+      if (transition.type === "spring") {
+        const stiffness = transition.stiffness || 200;
+        const damping = transition.damping || 40;
+        return Math.max(600, Math.min(1800, (damping / (2 * Math.sqrt(stiffness))) * 1200 + 400));
+      }
+      return (transition.duration || 0.8) * 1000;
+    }
+
+    // Safe element finder: handles IDs starting with numbers and arbitrary strings without CSS selector errors
+    const findTarget = (targetId: string): HTMLElement | null => {
+      if (!targetId) return null;
+      const byId = document.getElementById(targetId);
+      if (byId) return byId;
+
+      try {
+        const el = document.querySelector(
+          `[data-motion-id="${targetId}"], [data-framer-appear-id="${targetId}"], [id="${targetId}"]`
+        );
+        if (el instanceof HTMLElement) return el;
+      } catch {}
+
+      try {
+        const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(targetId) : targetId;
+        const el = document.querySelector(`.motion-${escaped}`);
+        if (el instanceof HTMLElement) return el;
+      } catch {}
+
+      return null;
+    };
+
+    // 1. Process Appear / Motion Configs
+    Object.entries(appearMap).forEach(([targetId, config]) => {
+      const el = findTarget(targetId);
       if (!el) return;
 
       const initial = config.initial || {};
       const animate = config.animate || {};
+      const hover = config.hover || {};
+      const press = config.press || {};
       const transition = config.transition || {};
 
       const delayMs = (transition.delay || 0) * 1000;
-      let durationMs = (transition.duration || 0.8) * 1000;
+      const durationMs = getDuration(transition);
+      const isContinuous = config.continuous || config.repeat === "Infinity" || config.repeat === Infinity;
 
-      if (transition.type === "spring") {
-        const stiffness = transition.stiffness || 200;
-        const damping = transition.damping || 40;
-        durationMs = Math.max(600, Math.min(1800, (damping / (2 * Math.sqrt(stiffness))) * 1200 + 400));
-      }
-
-      const initX = initial.x !== undefined ? `${initial.x}px` : "0px";
-      const initY = initial.y !== undefined ? `${initial.y}px` : "0px";
-      const initScale = initial.scale !== undefined ? initial.scale : 1;
-      const initRotate = initial.rotate !== undefined ? `${initial.rotate}deg` : "0deg";
-
-      const targetX = animate.x !== undefined ? `${animate.x}px` : "0px";
-      const targetY = animate.y !== undefined ? `${animate.y}px` : "0px";
-      const targetScale = animate.scale !== undefined ? animate.scale : 1;
-      const targetRotate = animate.rotate !== undefined ? `${animate.rotate}deg` : "0deg";
-
-      const initTransform = `translate(${initX}, ${initY}) scale(${initScale}) rotate(${initRotate})`;
-      const targetTransform = `translate(${targetX}, ${targetY}) scale(${targetScale}) rotate(${targetRotate})`;
-
+      const initTransform = getTransform(initial);
+      const targetTransform = getTransform(animate);
       const initOpacity = initial.opacity !== undefined ? initial.opacity : 1;
       const targetOpacity = animate.opacity !== undefined ? animate.opacity : 1;
 
-      try {
-        el.animate(
-          [
+      const runEntranceAnimation = () => {
+        try {
+          const keyframes = config.keyframes || [
             { opacity: initOpacity, transform: initTransform },
             { opacity: targetOpacity, transform: targetTransform },
-          ],
-          {
+          ];
+          const anim = el.animate(keyframes, {
             duration: durationMs,
             delay: delayMs,
             easing: "cubic-bezier(0.16, 1, 0.3, 1)",
             fill: "both",
-          }
+            iterations: isContinuous ? Infinity : 1,
+            direction: isContinuous ? "alternate" : "normal",
+          });
+          return anim;
+        } catch (err) {
+          el.style.transform = targetTransform;
+          el.style.opacity = `${targetOpacity}`;
+        }
+      };
+
+      // In-View Trigger vs Mount Trigger
+      const isInView = config.trigger === "in_view" || config.inView;
+      if (isInView && typeof IntersectionObserver !== "undefined") {
+        const once = config.once !== false;
+        const observer = new IntersectionObserver(
+          (entries) => {
+            entries.forEach((entry) => {
+              if (entry.isIntersecting) {
+                runEntranceAnimation();
+                if (once) observer.unobserve(el);
+              } else if (!once) {
+                el.style.opacity = `${initOpacity}`;
+                el.style.transform = initTransform;
+              }
+            });
+          },
+          { threshold: config.threshold || 0.15 }
         );
-      } catch (err) {
-        el.style.transform = targetTransform;
-        el.style.opacity = `${targetOpacity}`;
+        observer.observe(el);
+        cleanupFns.push(() => observer.disconnect());
+      } else {
+        runEntranceAnimation();
+      }
+
+      // Hover interaction variant
+      if (Object.keys(hover).length > 0) {
+        const hoverTransform = getTransform(hover);
+        const hoverOpacity = hover.opacity !== undefined ? hover.opacity : targetOpacity;
+
+        const onPointerEnter = () => {
+          el.animate(
+            [
+              { opacity: targetOpacity, transform: targetTransform },
+              { opacity: hoverOpacity, transform: hoverTransform },
+            ],
+            { duration: 250, fill: "forwards", easing: "ease-out" }
+          );
+        };
+        const onPointerLeave = () => {
+          el.animate(
+            [
+              { opacity: hoverOpacity, transform: hoverTransform },
+              { opacity: targetOpacity, transform: targetTransform },
+            ],
+            { duration: 300, fill: "forwards", easing: "ease-out" }
+          );
+        };
+        el.addEventListener("pointerenter", onPointerEnter);
+        el.addEventListener("pointerleave", onPointerLeave);
+        cleanupFns.push(() => {
+          el.removeEventListener("pointerenter", onPointerEnter);
+          el.removeEventListener("pointerleave", onPointerLeave);
+        });
+      }
+
+      // Press / tap interaction variant
+      if (Object.keys(press).length > 0) {
+        const pressTransform = getTransform(press);
+        const onPointerDown = () => {
+          el.animate(
+            [{ transform: targetTransform }, { transform: pressTransform }],
+            { duration: 150, fill: "forwards", easing: "ease-out" }
+          );
+        };
+        const onPointerUp = () => {
+          el.animate(
+            [{ transform: pressTransform }, { transform: targetTransform }],
+            { duration: 200, fill: "forwards", easing: "ease-out" }
+          );
+        };
+        el.addEventListener("pointerdown", onPointerDown);
+        el.addEventListener("pointerup", onPointerUp);
+        el.addEventListener("pointercancel", onPointerUp);
+        cleanupFns.push(() => {
+          el.removeEventListener("pointerdown", onPointerDown);
+          el.removeEventListener("pointerup", onPointerUp);
+          el.removeEventListener("pointercancel", onPointerUp);
+        });
       }
     });
+
+    // 2. Parallax / Scroll-Linked Elements
+    const parallaxElements: HTMLElement[] = [];
+    parallaxList.forEach((sel) => {
+      try {
+        document.querySelectorAll(sel).forEach((node) => {
+          if (node instanceof HTMLElement) parallaxElements.push(node);
+        });
+      } catch {}
+    });
+    try {
+      document.querySelectorAll("[data-parallax]").forEach((node) => {
+        if (node instanceof HTMLElement && !parallaxElements.includes(node)) {
+          parallaxElements.push(node);
+        }
+      });
+    } catch {}
+
+    if (parallaxElements.length > 0) {
+      let ticking = false;
+      const onScroll = () => {
+        if (!ticking) {
+          window.requestAnimationFrame(() => {
+            const scrollY = window.scrollY;
+            parallaxElements.forEach((el) => {
+              const speed = parseFloat(el.getAttribute("data-parallax-speed") || "0.15");
+              el.style.transform = `translate3d(0, ${Math.round(scrollY * speed)}px, 0)`;
+            });
+            ticking = false;
+          });
+          ticking = true;
+        }
+      };
+      window.addEventListener("scroll", onScroll, { passive: true });
+      cleanupFns.push(() => window.removeEventListener("scroll", onScroll));
+    }
+
+    // 3. Generic Interaction Listeners (Evidence-backed only)
+    // Menu toggles
+    const toggleButtons = document.querySelectorAll("[data-toggle-target]");
+    toggleButtons.forEach((btn) => {
+      const targetSelector = btn.getAttribute("data-toggle-target");
+      if (!targetSelector) return;
+      try {
+        const targetEl = document.querySelector(targetSelector) as HTMLElement;
+        if (!targetEl) return;
+
+        const onClick = () => {
+          const isExpanded = btn.getAttribute("aria-expanded") === "true";
+          btn.setAttribute("aria-expanded", isExpanded ? "false" : "true");
+          targetEl.classList.toggle("is-open", !isExpanded);
+        };
+        btn.addEventListener("click", onClick);
+        cleanupFns.push(() => btn.removeEventListener("click", onClick));
+      } catch {}
+    });
+
+    // Accordions
+    const accordionTriggers = document.querySelectorAll("[data-accordion-trigger]");
+    accordionTriggers.forEach((trigger) => {
+      const content = trigger.nextElementSibling as HTMLElement;
+      if (!content) return;
+      const onAccordionClick = () => {
+        const open = trigger.getAttribute("aria-expanded") === "true";
+        trigger.setAttribute("aria-expanded", open ? "false" : "true");
+        content.style.display = open ? "none" : "block";
+      };
+      trigger.addEventListener("click", onAccordionClick);
+      cleanupFns.push(() => trigger.removeEventListener("click", onAccordionClick));
+    });
+
+    // Tab switchers
+    const tabTriggers = document.querySelectorAll("[data-tab-target]");
+    tabTriggers.forEach((tab) => {
+      const targetId = tab.getAttribute("data-tab-target");
+      if (!targetId) return;
+      const onTabClick = () => {
+        const parent = tab.closest("[data-tab-group]") || document.body;
+        parent.querySelectorAll("[data-tab-target]").forEach((t) => t.classList.remove("active"));
+        parent.querySelectorAll("[data-tab-panel]").forEach((p) => ((p as HTMLElement).style.display = "none"));
+        tab.classList.add("active");
+        const panel = parent.querySelector(`[data-tab-panel="${targetId}"]`) as HTMLElement;
+        if (panel) panel.style.display = "block";
+      };
+      tab.addEventListener("click", onTabClick);
+      cleanupFns.push(() => tab.removeEventListener("click", onTabClick));
+    });
+
+    return () => {
+      cleanupFns.forEach((fn) => fn());
+    };
   }, [animations]);
 
   return null;
@@ -1108,12 +1345,24 @@ export default function FramerAppearRuntime({
 """,
         )
 
-        # 2. CursorFollower.tsx
+        # 2. FramerAppearRuntime.tsx (Backwards-compatible adapter re-export)
+        self._text(
+            "components/FramerAppearRuntime.tsx",
+            """\"use client\";
+
+import MotionRuntime, { MotionConfig, AppearConfig } from "./MotionRuntime";
+
+export type { MotionConfig, AppearConfig };
+export default MotionRuntime;
+""",
+        )
+
+        # 3. CursorFollower.tsx
         self._text(
             "components/CursorFollower.tsx",
             """\"use client\";
 
-import { useEffect, useState } from "react";
+import React, { useState, useEffect } from "react";
 
 export default function CursorFollower() {
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
@@ -1157,15 +1406,15 @@ export default function CursorFollower() {
 """,
         )
 
-        # 3. LiveClock.tsx
+        # 4. LiveClock.tsx (Generic time emitter without hardcoded snapshot defaults)
         self._text(
             "components/LiveClock.tsx",
             """\"use client\";
 
 import React, { useState, useEffect } from "react";
 
-export default function LiveClock({ initialTime = "14:09:02" }: { initialTime?: string }) {
-  const [time, setTime] = useState(initialTime);
+export default function LiveClock({ initialTime = "" }: { initialTime?: string }) {
+  const [time, setTime] = useState(initialTime || "--:--:--");
 
   useEffect(() => {
     const update = () => {
@@ -1194,6 +1443,9 @@ export default function LiveClock({ initialTime = "14:09:02" }: { initialTime?: 
             [],
         )
 
+        has_work_routes = False
+        has_contact_route = False
+
         for route in routes:
             if not route or route in ("", "/"):
                 continue
@@ -1201,15 +1453,26 @@ export default function LiveClock({ initialTime = "14:09:02" }: { initialTime?: 
             clean_route = route if route.startswith("/") else f"/{route}"
 
             if clean_route == "/contact":
+                has_contact_route = True
                 self._write_contact_page()
             elif clean_route.startswith("/work/"):
+                has_work_routes = True
                 self._write_work_page(clean_route)
             else:
                 self._write_custom_page(clean_route)
 
-        # Ensure contact and dynamic work route exist
-        self._write_contact_page()
-        self._write_work_dynamic_page()
+        # Generate work pages from data if data['projects'] exists or work routes were found
+        projects = self.ir.get("data", {}).get("projects", [])
+        if projects or has_work_routes or any(r == "/work" or r.startswith("/work/") for r in routes):
+            for p in projects:
+                slug = p.get("slug")
+                if slug:
+                    self._write_work_page(f"/work/{slug}")
+            self._write_work_dynamic_page()
+            self._write_work_index_page()
+
+        if has_contact_route or "/contact" in routes:
+            self._write_contact_page()
 
     def _write_home_page(self):
         pages = self.ir.get("pages", [])
@@ -1241,24 +1504,72 @@ export default function LiveClock({ initialTime = "14:09:02" }: { initialTime?: 
                 imports.append(f'import {name} from "../components/{name}";')
                 rendered.append(f"      <{name} />")
 
+        content_root, _ = self.emitter.decompose_content_sections(self.emitter.tree) if self.emitter else (None, [])
+        wrapper_open = ""
+        wrapper_close = ""
+        if content_root and content_root.get("tag"):
+            c_tag = content_root.get("tag", "div")
+            c_classes = " ".join(content_root.get("classes", [])).strip()
+            c_cls_attr = f' className="{c_classes}"' if c_classes else ""
+            c_style = content_root.get("attributes", {}).get("style", "")
+            c_style_jsx = self.emitter._parse_style_attribute(c_style) if c_style else ""
+            c_id = content_root.get("id")
+            c_id_attr = f' id="{c_id}"' if c_id else ""
+
+            if c_tag == "main":
+                main_open = f"<main{c_cls_attr}{c_id_attr}{c_style_jsx}>"
+                main_close = "</main>"
+            else:
+                main_open = "<main>"
+                main_close = "</main>"
+                wrapper_open = f"      <{c_tag}{c_cls_attr}{c_id_attr}{c_style_jsx}>\n"
+                wrapper_close = f"      </{c_tag}>\n"
+        else:
+            main_open = "<main>"
+            main_close = "</main>"
+
+        body_rendered = "\n".join(f"  {r}" if wrapper_open else r for r in rendered)
         content = (
             "\n".join(imports)
             + "\n\n"
-            + """export default function Home() {
+            + f"""export default function Home() {{
   return (
-    <main>
-"""
-            + "\n".join(rendered)
-            + """
-    </main>
+    {main_open}
+{wrapper_open}{body_rendered}
+{wrapper_close}    {main_close}
   );
-}
+}}
 """
         )
 
         self._text("app/page.tsx", content)
 
+    def _rel_components_path(self, segment: str) -> str:
+        depth = len(segment.strip("/").split("/")) + 1
+        return "../" * depth + "components"
+
     def _write_contact_page(self):
+        pages = self.ir.get("pages", [])
+        matched = next((p for p in pages if p.get("route") in ("/contact", "contact")), None)
+        if matched and matched.get("dom"):
+            jsx_body = self.emitter.emit_jsx(matched["dom"], depth=3, is_root=False)
+            self._text(
+                "app/contact/page.tsx",
+                f"""import React from "react";
+import HeaderNavigation from "../../components/HeaderNavigation";
+import Footer from "../../components/Footer";
+
+export default function ContactPage() {{
+  return (
+    <main>
+{jsx_body}
+    </main>
+  );
+}}
+""",
+            )
+            return
+
         self._text(
             "app/contact/page.tsx",
             """import React from "react";
@@ -1272,17 +1583,17 @@ export default function ContactPage() {
       <section style={{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "60vh" }}>
         <p style={{ fontFamily: "var(--font-mono, monospace)", fontSize: "14px", letterSpacing: "0.1em", opacity: 0.7, marginBottom: "16px" }}>// CONTACT</p>
         <h1 style={{ fontFamily: "var(--font-display)", fontSize: "clamp(48px, 8vw, 96px)", fontWeight: 700, lineHeight: 1, margin: "0 0 32px 0" }}>
-          LET'S BUILD TOGETHER
+          Contact
         </h1>
         <p style={{ fontFamily: "var(--font-body)", fontSize: "20px", maxWidth: "600px", opacity: 0.8, lineHeight: 1.6, marginBottom: "48px" }}>
-          Available for innovative projects worldwide. Combining design engineering, machine learning, and high-performance interfaces.
+          Get in touch or submit an inquiry.
         </p>
         <div style={{ display: "flex", gap: "24px", flexWrap: "wrap", marginBottom: "64px" }}>
           <a
             href="mailto:contact@example.com"
             style={{ display: "inline-flex", alignItems: "center", padding: "16px 32px", borderRadius: "9999px", background: "var(--color-foreground, #ffffff)", color: "var(--color-background, #0a0a0a)", fontWeight: 600, textDecoration: "none" }}
           >
-            GET IN TOUCH
+            Get in Touch
           </a>
           <a
             href="/"
@@ -1296,6 +1607,75 @@ export default function ContactPage() {
     </main>
   );
 }
+""",
+        )
+
+    def _write_work_index_page(self):
+        pages = self.ir.get("pages", [])
+        matched = next((p for p in pages if p.get("route") in ("/work", "work")), None)
+        if matched and matched.get("dom"):
+            jsx_body = self.emitter.emit_jsx(matched["dom"], depth=3, is_root=False)
+            self._text(
+                "app/work/page.tsx",
+                f"""import React from "react";
+import HeaderNavigation from "../../components/HeaderNavigation";
+import Footer from "../../components/Footer";
+
+export default function WorkIndexPage() {{
+  return (
+    <main>
+{jsx_body}
+    </main>
+  );
+}}
+""",
+            )
+            return
+
+        projects = self.ir.get("data", {}).get("projects", [])
+        project_cards = []
+        for p in projects:
+            slug = p.get("slug") or self._slugify(p.get("title", ""))
+            title = p.get("title", "Project")
+            cat = p.get("category") or "Featured"
+            img = p.get("image")
+            img_el = f'<img src="{img}" alt="{title}" style={{{{ width: "100%", height: "240px", objectFit: "cover", borderRadius: "12px", marginBottom: "16px" }}}} />' if img else ""
+            project_cards.append(f"""          <a
+            key="{slug}"
+            href="/work/{slug}"
+            style={{{{ display: "flex", flexDirection: "column", padding: "24px", borderRadius: "16px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", textDecoration: "none", color: "inherit" }}}}
+          >
+            {img_el}
+            <span style={{{{ fontSize: "12px", fontFamily: "var(--font-mono, monospace)", textTransform: "uppercase", opacity: 0.6, marginBottom: "8px" }}}}>{cat}</span>
+            <h2 style={{{{ fontSize: "24px", fontWeight: 700, margin: "0 0 8px 0", fontFamily: "var(--font-display)" }}}}>{title}</h2>
+            <p style={{{{ fontSize: "14px", opacity: 0.8, lineHeight: 1.5, margin: 0 }}}}>{p.get("description", "")}</p>
+          </a>""")
+
+        cards_markup = "\n".join(project_cards) if project_cards else "          <p style={{ opacity: 0.6 }}>No projects listed.</p>"
+
+        self._text(
+            "app/work/page.tsx",
+            f"""import React from "react";
+import HeaderNavigation from "../../components/HeaderNavigation";
+import Footer from "../../components/Footer";
+
+export default function WorkIndexPage() {{
+  return (
+    <main>
+      <HeaderNavigation />
+      <section style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "70vh" }}}}>
+        <p style={{{{ fontFamily: "var(--font-mono, monospace)", fontSize: "14px", letterSpacing: "0.1em", opacity: 0.7, marginBottom: "16px" }}}}>// PORTFOLIO</p>
+        <h1 style={{{{ fontFamily: "var(--font-display)", fontSize: "clamp(40px, 6vw, 72px)", fontWeight: 700, margin: "0 0 32px 0" }}}}>
+          Selected Work
+        </h1>
+        <div style={{{{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "24px", marginTop: "32px" }}}}>
+{cards_markup}
+        </div>
+      </section>
+      <Footer />
+    </main>
+  );
+}}
 """,
         )
 
@@ -1349,14 +1729,36 @@ export default async function DynamicWorkPage({ params }: WorkPageProps) {
     def _write_work_page(self, route: str):
         slug = route.rstrip("/").split("/")[-1]
         title = self._title_from_slug(slug)
+        pages = self.ir.get("pages", [])
+        matched = next((p for p in pages if p.get("route") == route or p.get("route") == f"/work/{slug}"), None)
+
+        if matched and matched.get("dom"):
+            jsx_body = self.emitter.emit_jsx(matched["dom"], depth=3, is_root=False)
+            self._text(
+                f"app/work/{slug}/page.tsx",
+                f"""import React from "react";
+import HeaderNavigation from "../../../components/HeaderNavigation";
+import Footer from "../../../components/Footer";
+
+export default function WorkPage() {{
+  return (
+    <main>
+{jsx_body}
+    </main>
+  );
+}}
+""",
+            )
+            return
+
         projects = self.ir.get("data", {}).get("projects", [])
         proj = next((p for p in projects if p.get("slug") == slug or self._slugify(p.get("title", "")) == slug), None)
 
         proj_title = proj.get("title") if proj else title
-        proj_cat = proj.get("category") if proj else "Case Study"
+        proj_cat = proj.get("category") if proj else "Featured"
         proj_img = proj.get("image") if proj else None
-        proj_desc = proj.get("description") if proj else f"High-fidelity case study for {proj_title}."
-        proj_tags = (proj.get("tags") if proj else None) or ["AI / Machine Learning", "Creative Development"]
+        proj_desc = proj.get("description") if proj else f"Detailed overview for {proj_title}."
+        proj_tags = (proj.get("tags") if proj else None) or ([proj_cat] if proj_cat else ["Featured"])
 
         img_markup = f'<img src="{proj_img}" alt="{proj_title}" style={{{{ width: "100%", maxHeight: "640px", objectFit: "cover", borderRadius: "16px", margin: "40px 0" }}}} />' if proj_img else ""
         tags_markup = "\n".join([f'          <span key="{i}" style={{{{ padding: "6px 14px", borderRadius: "9999px", background: "rgba(255,255,255,0.08)", fontSize: "14px", fontFamily: "var(--font-mono, monospace)" }}}}>{t}</span>' for i, t in enumerate(proj_tags)])
@@ -1400,18 +1802,41 @@ export default function WorkPage() {{
 
     def _write_custom_page(self, route: str):
         segment = route.strip("/")
-        title = self._title_from_slug(segment)
+        title = self._title_from_slug(segment.split("/")[-1])
+        pages = self.ir.get("pages", [])
+        matched = next((p for p in pages if p.get("route") == route or p.get("route") == f"/{segment}"), None)
+        comp_rel = self._rel_components_path(segment)
+        comp_name = "".join(w.capitalize() for w in re.split(r"[^a-zA-Z0-9]", segment)) + "Page"
+
+        if matched and matched.get("dom"):
+            jsx_body = self.emitter.emit_jsx(matched["dom"], depth=3, is_root=False)
+            self._text(
+                f"app/{segment}/page.tsx",
+                f"""import React from "react";
+import HeaderNavigation from "{comp_rel}/HeaderNavigation";
+import Footer from "{comp_rel}/Footer";
+
+export default function {comp_name}() {{
+  return (
+    <main>
+{jsx_body}
+    </main>
+  );
+}}
+""",
+            )
+            return
 
         self._text(
             f"app/{segment}/page.tsx",
-            f"""import HeaderNavigation from "../../components/HeaderNavigation";
-import Footer from "../../components/Footer";
+            f"""import HeaderNavigation from "{comp_rel}/HeaderNavigation";
+import Footer from "{comp_rel}/Footer";
 
-export default function {title.replace(' ', '')}Page() {{
+export default function {comp_name}() {{
   return (
     <main>
       <HeaderNavigation />
-      <section className="page-section">
+      <section className="page-section" style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "60vh" }}}}>
         <h1 style={{{{ fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 800 }}}}>{title}</h1>
       </section>
       <Footer />

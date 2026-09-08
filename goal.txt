@@ -1,0 +1,23 @@
+Build a general website reconstruction engine that can inspect a website from 
+its captured evidence and recreate its structure, visuals, responsive behavior, routes, assets,
+ interactions, animations, and media — regardless of whether the source came from Framer, Figma,
+  Squarespace, WordPress, or another web platform.
+
+
+
+                      WEBEXTRACTOR
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+     SOURCE          EVIDENCE          OUTPUT
+        │                │                │
+ ┌──────┼──────┐   ┌─────┼─────┐    ┌─────┼─────┐
+ │      │      │   │     │     │    │     │     │
+Framer Figma WordPress DOM  CSS  Motion Next  React
+Squarespace       Assets Media Routes Components
+                         │
+                         ▼
+                GENERIC SITE MODEL
+                         │
+                         ▼
+                  RECONSTRUCTION
