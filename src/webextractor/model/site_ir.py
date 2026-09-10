@@ -29,6 +29,7 @@ class SiteIR:
     raw_tokens: dict[str, Any] | None = None
     screenshot_paths: dict[str, str] = field(default_factory=dict)
     animations: dict[str, Any] = field(default_factory=dict)
+    interactions: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -82,6 +83,10 @@ class SiteIR:
         )
         (path / "animations.json").write_text(
             json.dumps(self.animations, indent=2),
+            encoding="utf-8",
+        )
+        (path / "interactions.json").write_text(
+            json.dumps(self.interactions, indent=2),
             encoding="utf-8",
         )
 

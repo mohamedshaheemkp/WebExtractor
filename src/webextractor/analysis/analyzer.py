@@ -18,6 +18,7 @@ from .typography_engine import TypographyEngine
 from .layout_engine import LayoutFidelityEngine
 from .source_css import extract_relevant_css
 from .animations import AnimationExtractor
+from .interactions import InteractionAnalyzer
 
 
 class SiteAnalyzer:
@@ -146,6 +147,15 @@ class SiteAnalyzer:
         animations = AnimationExtractor.extract_animations(
             html_content=html,
             css_content=capture.get("css", ""),
+        )
+
+        # Extract behavioral interactions from probe evidence and DOM/CSS/route clues
+        probe_interactions = capture.get("interactions", [])
+        interactions = InteractionAnalyzer.analyze_behavioral_interactions(
+            probe_interactions=probe_interactions,
+            html_content=html,
+            css_content=capture.get("css", ""),
+            routes=routes,
         )
 
         # Extract collection items (projects, posts, products) from structured sub-routes/links in HTML
@@ -292,6 +302,7 @@ class SiteAnalyzer:
         setattr(site_model, "responsive_rules", capture.get("responsive_rules", []))
         setattr(site_model, "viewports", capture.get("viewports", {}))
         setattr(site_model, "animations", animations)
+        setattr(site_model, "interactions", interactions)
 
         return site_model
 
@@ -313,8 +324,9 @@ class SiteAnalyzer:
                     sec_type = "header" if (idx == 0 and tag in ("header", "nav", "div")) else (
                         "footer" if (idx == len(sections) - 1 and tag in ("footer", "div")) else "section"
                     )
+                    c_name = "HeaderNavigation" if sec["name"] == "Header" and sec_type == "header" else sec["name"]
                     item: dict[str, Any] = {
-                        "name": sec["name"],
+                        "name": c_name,
                         "type": sec_type,
                         "tag": sec["tag"],
                     }

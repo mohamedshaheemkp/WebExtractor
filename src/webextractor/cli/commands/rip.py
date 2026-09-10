@@ -164,6 +164,7 @@ async def execute_rip(target: str, output_dir: Path | None = None) -> None:
         layout=getattr(site_model, "layout", {}),
         raw_tokens=site_model.tokens,
         animations=getattr(site_model, "animations", {}),
+        interactions=getattr(site_model, "interactions", []),
     )
 
     site_ir.save(dest_dir / "analysis")
@@ -171,6 +172,7 @@ async def execute_rip(target: str, output_dir: Path | None = None) -> None:
     console.print(f"      [green]✓[/green] Semantic component hierarchy compiled ({num_components} components)")
     console.print(f"      [green]✓[/green] Route graph constructed ({len(site_ir.routes)} routes)")
     console.print(f"      [green]✓[/green] {len(site_ir.asset_bindings)} authoritative asset bindings established")
+    console.print(f"      [green]✓[/green] {len(site_ir.interactions)} behavioral interactions reconstructed (menus, transitions, triggers)")
     console.print("      [green]✓[/green] Canonical SiteIR persisted to analysis/")
 
     # [6/6] GENERATING REACT & NEXT.JS AND VERIFYING INTEGRITY

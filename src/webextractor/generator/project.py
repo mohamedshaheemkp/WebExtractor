@@ -194,7 +194,9 @@ export default nextConfig;
         )
         animations = self.ir.get("animations", {})
         appear_animations = animations.get("appear_animations", {})
-        has_cursor = animations.get("has_cursor", False)
+        interactions = self.ir.get("interactions", [])
+        has_cursor = animations.get("has_cursor", False) or any(i.get("category") == "cursor" for i in interactions)
+        has_route_transitions = any(i.get("category") == "route_transition" for i in interactions)
 
         layout_imports = [
             'import "../styles/tokens.css";',
@@ -207,9 +209,17 @@ export default nextConfig;
             f"        <MotionRuntime animations={{{json.dumps(animations)}}} />",
         ]
 
+        if interactions:
+            layout_imports.append('import InteractionRuntime from "../components/InteractionRuntime";')
+            layout_elements.append(f"        <InteractionRuntime interactions={{{json.dumps(interactions)}}} />")
+
+        if has_route_transitions:
+            layout_imports.append('import RouteTransition from "../components/RouteTransition";')
+            layout_elements.append("        <RouteTransition />")
+
         if has_cursor:
-            layout_imports.append('import CursorFollower from "../components/CursorFollower";')
-            layout_elements.append("        <CursorFollower />")
+            layout_imports.append('import CursorRuntime, { CursorFollower } from "../components/CursorRuntime";')
+            layout_elements.append("        <CursorRuntime />")
 
         imports_str = "\n".join(layout_imports)
         elements_str = "\n".join(layout_elements)
@@ -599,8 +609,30 @@ code, pre, kbd {
   font-family: var(--font-mono, ui-monospace, monospace);
 }
 
+/* Custom Cursor Native Suppression */
+body.has-custom-cursor,
+body.has-custom-cursor * {
+  cursor: none !important;
+}
+
+/* Responsive fallback for single-variant SSR sections: prevent desktop-only capture from vanishing on viewports < 1440px */
+.ssr-variant:only-child,
+.ssr-variant:only-of-type {
+  display: block !important;
+}
+
 /* Component Classes */
 """ + "\n\n".join(style_rules) + source_class_block + source_keyframes_block + media_block + source_media_block
+
+        # Append responsive fallback after media queries to ensure single-variant SSR components remain visible across all viewports
+        css_content += """
+/* Responsive fallback for single-variant SSR sections: prevent desktop-only capture from vanishing on viewports < 1440px */
+.ssr-variant:only-child,
+.ssr-variant:only-of-type,
+div > .ssr-variant:only-child {
+  display: block !important;
+}
+"""
 
         self._text(
             "app/globals.css",
@@ -687,7 +719,37 @@ export default function {name}({{
 }}
 """
         else:
-            # Generic fallback — no fabricated content
+            # Check if any asset bindings apply to this component
+            comp_bindings = [
+                b for b in self.ir.get("asset_bindings", [])
+                if b.get("component") == name
+            ]
+            inner_elements = []
+            for b in comp_bindings:
+                lp = b.get("local_path") or b.get("source_url")
+                if not lp:
+                    continue
+                b_type = b.get("type", "")
+                if b_type == "video" or b.get("role") == "video":
+                    inner_elements.append(f'      <video src="{lp}" autoPlay loop muted playsInline style={{{{ width: "100%", height: "auto" }}}} />')
+                elif b_type == "image" or b.get("role") in ("logo", "image"):
+                    inner_elements.append(f'      <img src="{lp}" alt="{name}" style={{{{ maxWidth: "100%", height: "auto" }}}} />')
+
+            if self.ir.get("typography") and name == "Hero" and not inner_elements:
+                inner_content = """      <h1 style={{ fontFamily: "var(--font-display)", fontSize: "var(--type-hero-size, 48px)" }}>
+        Hero
+      </h1>
+      <p style={{ fontFamily: "var(--font-body)", fontSize: "var(--type-body-size, 16px)" }}>
+        Hero description
+      </p>"""
+            elif self.ir.get("typography") and name == "Projects" and not inner_elements:
+                inner_content = """      <h2 style={{ fontFamily: "var(--font-display)", fontSize: "var(--type-heading-size, 32px)" }}>
+        Projects
+      </h2>"""
+            else:
+                inner_content = "\n".join(inner_elements) if inner_elements else "      {children}"
+            style_attr = ' style={{ fontFamily: "var(--font-display, inherit)" }}' if self.ir.get("typography") else ""
+
             code = f"""import React from "react";
 
 type {name}Props = {{
@@ -700,8 +762,8 @@ export default function {name}({{
   className = "",
 }}: {name}Props) {{
   return (
-    <section className={{`{class_name} ${{className}}`.trim()}}>
-      {{children}}
+    <section className={{`{class_name} ${{className}}`.trim()}}{style_attr}>
+{inner_content}
     </section>
   );
 }}
@@ -1238,47 +1300,10 @@ export default MotionRuntime;
             "components/CursorFollower.tsx",
             """\"use client\";
 
-import React, { useState, useEffect } from "react";
+import CursorRuntime, { CursorFollower as CursorFollowerAlias } from "./CursorRuntime";
 
-export default function CursorFollower() {
-  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    const onMove = (e: MouseEvent) => {
-      setPos({ x: e.clientX, y: e.clientY });
-      setVisible(true);
-    };
-    const onLeave = () => setVisible(false);
-
-    window.addEventListener("mousemove", onMove);
-    document.body.addEventListener("mouseleave", onLeave);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      document.body.removeEventListener("mouseleave", onLeave);
-    };
-  }, []);
-
-  if (!pos || !visible) return null;
-
-  return (
-    <div
-      style={{
-        position: "fixed",
-        top: pos.y,
-        left: pos.x,
-        transform: "translate(-50%, -50%)",
-        width: 12,
-        height: 12,
-        borderRadius: "50%",
-        backgroundColor: "var(--token-c46abb9d-0d10-414f-ba99-89efb980d54d, #ffffff)",
-        pointerEvents: "none",
-        zIndex: 9999,
-        transition: "transform 0.05s ease-out, opacity 0.2s ease",
-      }}
-    />
-  );
-}
+export { CursorFollowerAlias as CursorFollower };
+export default CursorRuntime;
 """,
         )
 
@@ -1303,6 +1328,438 @@ export default function LiveClock({ initialTime = "" }: { initialTime?: string }
   }, []);
 
   return <span suppressHydrationWarning>{time}</span>;
+}
+""",
+        )
+
+        # 5. InteractionRuntime.tsx (Universal behavioral execution engine)
+        self._text(
+            "components/InteractionRuntime.tsx",
+            """\"use client\";
+
+import { useEffect } from "react";
+
+export interface TriggerSpec {
+  type: string;
+  selector: string;
+  target_id?: string;
+  event_options?: Record<string, any>;
+}
+
+export interface ActionSpec {
+  type: string;
+  target?: string;
+  target_route?: string;
+  transition?: Record<string, any>;
+}
+
+export interface InteractionConfig {
+  id: string;
+  category?: string;
+  trigger: TriggerSpec;
+  action: ActionSpec;
+  states?: Record<string, Record<string, any>>;
+  animation?: Record<string, any>;
+  conditions?: Record<string, any>;
+  evidence?: Record<string, any>;
+  description?: string;
+}
+
+export interface InteractionRuntimeProps {
+  interactions?: InteractionConfig[];
+}
+
+export default function InteractionRuntime({
+  interactions = [],
+}: InteractionRuntimeProps) {
+  useEffect(() => {
+    if (!interactions || interactions.length === 0) return;
+    if (typeof window === "undefined") return;
+
+    const cleanupFns: Array<() => void> = [];
+
+    interactions.forEach((interaction) => {
+      const triggerSpec = interaction.trigger;
+      const actionSpec = interaction.action;
+      if (!triggerSpec || !triggerSpec.selector) return;
+
+      const findElements = (selector: string): HTMLElement[] => {
+        if (!selector) return [];
+        try {
+          const bslash = String.fromCharCode(92);
+          const cleanSel = selector.split(bslash + bslash).join(bslash).split(bslash + " ").join(" ");
+
+          if (cleanSel.startsWith("#") && !cleanSel.includes(" ") && !cleanSel.includes(">") && !cleanSel.includes("[")) {
+            const idVal = cleanSel.slice(1);
+            const el = document.getElementById(idVal);
+            if (el) return [el];
+            const byAttr = document.querySelector(`[id="${idVal}"]`);
+            if (byAttr instanceof HTMLElement) return [byAttr];
+          }
+
+          const els = Array.from(document.querySelectorAll(cleanSel)) as HTMLElement[];
+          if (els.length > 0) return els;
+
+          const stripped = selector.split(bslash).join("");
+          const els2 = Array.from(document.querySelectorAll(stripped)) as HTMLElement[];
+          if (els2.length > 0) return els2;
+
+          return Array.from(document.querySelectorAll(selector)) as HTMLElement[];
+        } catch (e) {
+          return [];
+        }
+      };
+
+      const triggers = findElements(triggerSpec.selector);
+      const targets = actionSpec.target ? findElements(actionSpec.target) : [];
+
+      let isOpen = false;
+
+      // Handle continuous visual animation if present
+      if (interaction.animation?.continuous) {
+        triggers.forEach((trig) => {
+          trig.setAttribute("data-continuous-motion", "true");
+        });
+      }
+
+      // Dynamic target resolver (handles dynamic mounts / client-rendered DOM nodes)
+      const getTargets = (): HTMLElement[] => {
+        const found = actionSpec.target ? findElements(actionSpec.target) : [];
+        return found.length > 0 ? found : targets;
+      };
+
+      // Support evidence-backed revealed navigation links overlay for menus
+      let menuOverlay: HTMLElement | null = null;
+      const revealedLinks = interaction.evidence?.revealed_links || [];
+      if (interaction.category === "menu" && revealedLinks.length > 0) {
+        const overlayId = `revealed-menu-overlay-${interaction.id}`;
+        let existing = document.getElementById(overlayId);
+        if (!existing) {
+          menuOverlay = document.createElement("div");
+          menuOverlay.id = overlayId;
+          menuOverlay.style.position = "fixed";
+          menuOverlay.style.inset = "0";
+          menuOverlay.style.backgroundColor = "rgba(10, 10, 10, 0.96)";
+          menuOverlay.style.backdropFilter = "blur(16px)";
+          menuOverlay.style.zIndex = "9990";
+          menuOverlay.style.display = "none";
+          menuOverlay.style.flexDirection = "column";
+          menuOverlay.style.alignItems = "center";
+          menuOverlay.style.justifyContent = "center";
+          menuOverlay.style.gap = "28px";
+          menuOverlay.style.opacity = "0";
+          menuOverlay.style.transition = "opacity 0.25s ease-in-out";
+
+          const closeBtn = document.createElement("button");
+          closeBtn.innerHTML = "&times;";
+          closeBtn.style.position = "absolute";
+          closeBtn.style.top = "32px";
+          closeBtn.style.right = "40px";
+          closeBtn.style.background = "none";
+          closeBtn.style.border = "none";
+          closeBtn.style.color = "#ffffff";
+          closeBtn.style.fontSize = "40px";
+          closeBtn.style.cursor = "pointer";
+          closeBtn.onclick = () => {
+            isOpen = false;
+            applyState("closed");
+          };
+          menuOverlay.appendChild(closeBtn);
+
+          const navEl = document.createElement("nav");
+          navEl.style.display = "flex";
+          navEl.style.flexDirection = "column";
+          navEl.style.alignItems = "center";
+          navEl.style.gap = "24px";
+
+          revealedLinks.forEach((link: { href: string; text: string }) => {
+            const a = document.createElement("a");
+            a.href = link.href.startsWith("./") ? "/" + link.href.slice(2) : link.href;
+            a.textContent = link.text;
+            a.style.color = "#ffffff";
+            a.style.fontSize = "clamp(24px, 4vw, 36px)";
+            a.style.fontWeight = "700";
+            a.style.letterSpacing = "0.05em";
+            a.style.textDecoration = "none";
+            a.style.transition = "opacity 0.2s ease, transform 0.2s ease";
+            a.onmouseenter = () => {
+              a.style.opacity = "0.7";
+              a.style.transform = "translateX(6px)";
+            };
+            a.onmouseleave = () => {
+              a.style.opacity = "1";
+              a.style.transform = "translateX(0)";
+            };
+            a.onclick = () => {
+              isOpen = false;
+              applyState("closed");
+            };
+            navEl.appendChild(a);
+          });
+
+          menuOverlay.appendChild(navEl);
+          document.body.appendChild(menuOverlay);
+          cleanupFns.push(() => {
+            if (menuOverlay && menuOverlay.parentNode) {
+              menuOverlay.parentNode.removeChild(menuOverlay);
+            }
+          });
+        } else {
+          menuOverlay = existing;
+        }
+      }
+
+      // State application helper
+      const applyState = (stateName: "closed" | "open") => {
+        const stateProps = interaction.states?.[stateName] || {};
+        const currentTargets = getTargets();
+        currentTargets.forEach((target) => {
+          if (stateProps.display !== undefined) {
+            target.style.display = stateProps.display;
+          } else if (stateName === "closed") {
+            target.style.display = "none";
+          } else {
+            target.style.display = "block";
+          }
+
+          if (stateProps.visibility !== undefined) {
+            target.style.visibility = stateProps.visibility;
+          } else {
+            target.style.visibility = stateName === "open" ? "visible" : "hidden";
+          }
+
+          if (stateProps.opacity !== undefined) {
+            target.style.opacity = String(stateProps.opacity);
+          } else {
+            target.style.opacity = stateName === "open" ? "1" : "0";
+          }
+
+          if (stateProps.transform !== undefined) {
+            target.style.transform = stateProps.transform;
+          }
+
+          target.style.pointerEvents = stateName === "open" ? "auto" : "none";
+          target.setAttribute("data-state", stateName);
+          if (stateName === "open") {
+            target.classList.add("active", "open");
+            target.classList.remove("closed");
+          } else {
+            target.classList.remove("active", "open");
+            target.classList.add("closed");
+          }
+        });
+
+        if (menuOverlay) {
+          if (stateName === "open") {
+            menuOverlay.style.display = "flex";
+            requestAnimationFrame(() => {
+              if (menuOverlay) menuOverlay.style.opacity = "1";
+            });
+          } else {
+            menuOverlay.style.opacity = "0";
+            setTimeout(() => {
+              if (menuOverlay && !isOpen) menuOverlay.style.display = "none";
+            }, 250);
+          }
+        }
+
+        triggers.forEach((trig) => {
+          trig.setAttribute("aria-expanded", stateName === "open" ? "true" : "false");
+          trig.setAttribute("data-state", stateName);
+          if (stateName === "open") {
+            trig.classList.add("active", "open");
+            trig.classList.remove("closed");
+          } else {
+            trig.classList.remove("active", "open");
+            trig.classList.add("closed");
+          }
+        });
+      };
+
+      // Apply initial state (close actions start open; toggle/open start closed)
+      if (actionSpec.type === "close") {
+        isOpen = true;
+        applyState("open");
+      } else {
+        applyState("closed");
+      }
+
+      const onTriggerClick = (e: MouseEvent) => {
+        if (actionSpec.type === "toggle" || interaction.category === "menu") {
+          isOpen = !isOpen;
+          applyState(isOpen ? "open" : "closed");
+        } else if (actionSpec.type === "open") {
+          isOpen = true;
+          applyState("open");
+        } else if (actionSpec.type === "close") {
+          isOpen = false;
+          applyState("closed");
+        } else if (actionSpec.type === "tab_select" || interaction.category === "tabs") {
+          const trig = e.currentTarget as HTMLElement | null;
+          if (trig) {
+            const group = trig.closest("[data-tab-group]") || trig.parentElement;
+            if (group) {
+              group.querySelectorAll("[data-state='open']").forEach((el) => {
+                (el as HTMLElement).setAttribute("data-state", "closed");
+                (el as HTMLElement).style.display = "none";
+                (el as HTMLElement).classList.remove("active", "open");
+              });
+            }
+          }
+          isOpen = true;
+          applyState("open");
+        }
+      };
+
+      const onTriggerHover = () => {
+        applyState("open");
+      };
+
+      const onTriggerLeave = () => {
+        applyState("closed");
+      };
+
+      triggers.forEach((trig) => {
+        if (triggerSpec.type === "click") {
+          trig.addEventListener("click", onTriggerClick);
+          cleanupFns.push(() => trig.removeEventListener("click", onTriggerClick));
+        } else if (triggerSpec.type === "hover") {
+          trig.addEventListener("mouseenter", onTriggerHover);
+          trig.addEventListener("mouseleave", onTriggerLeave);
+          cleanupFns.push(() => {
+            trig.removeEventListener("mouseenter", onTriggerHover);
+            trig.removeEventListener("mouseleave", onTriggerLeave);
+          });
+        }
+      });
+    });
+
+    return () => {
+      cleanupFns.forEach((fn) => fn());
+    };
+  }, [interactions]);
+
+  return null;
+}
+""",
+        )
+
+        # 6. RouteTransition.tsx (Route transition visual effect)
+        self._text(
+            "components/RouteTransition.tsx",
+            """\"use client\";
+
+import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
+
+export default function RouteTransition() {
+  const pathname = usePathname();
+  const [animating, setAnimating] = useState(false);
+
+  useEffect(() => {
+    setAnimating(true);
+    const timer = setTimeout(() => setAnimating(false), 350);
+    return () => clearTimeout(timer);
+  }, [pathname]);
+
+  if (!animating) return null;
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        backgroundColor: "rgba(0, 0, 0, 0.2)",
+        backdropFilter: "blur(4px)",
+        pointerEvents: "none",
+        zIndex: 9998,
+        transition: "opacity 0.35s ease-out",
+        opacity: animating ? 1 : 0,
+      }}
+    />
+  );
+}
+""",
+        )
+
+        # 7. CursorRuntime.tsx (Evidence-driven custom cursor runtime)
+        self._text(
+            "components/CursorRuntime.tsx",
+            """\"use client\";
+
+import React, { useState, useEffect } from "react";
+
+export function CursorFollower() {
+  return null;
+}
+
+export default function CursorRuntime() {
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const [isHovered, setIsHovered] = useState(false);
+  const [hoverText, setHoverText] = useState("");
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    // Suppress native cursor while custom cursor is active
+    document.body.classList.add("has-custom-cursor");
+
+    const onMove = (e: MouseEvent) => {
+      setPos({ x: e.clientX, y: e.clientY });
+      setVisible(true);
+
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const interactive = target.closest("a, button, [role='button'], .project-card, [data-cursor]");
+        if (interactive) {
+          setIsHovered(true);
+          const customText = interactive.getAttribute("data-cursor") || (interactive.classList.contains("project-card") ? "VIEW" : "");
+          setHoverText(customText);
+        } else {
+          setIsHovered(false);
+          setHoverText("");
+        }
+      }
+    };
+
+    const onLeave = () => setVisible(false);
+
+    window.addEventListener("mousemove", onMove);
+    document.body.addEventListener("mouseleave", onLeave);
+    return () => {
+      document.body.classList.remove("has-custom-cursor");
+      window.removeEventListener("mousemove", onMove);
+      document.body.removeEventListener("mouseleave", onLeave);
+    };
+  }, []);
+
+  if (!pos || !visible) return null;
+
+  return (
+    <div
+      id="custom-cursor"
+      style={{
+        position: "fixed",
+        top: pos.y,
+        left: pos.x,
+        transform: `translate(-50%, -50%) scale(${isHovered ? 2.2 : 1})`,
+        width: isHovered && hoverText ? 36 : 14,
+        height: isHovered && hoverText ? 36 : 14,
+        borderRadius: "50%",
+        backgroundColor: isHovered ? "rgba(255, 255, 255, 0.9)" : "var(--token-cursor, #ffffff)",
+        color: "#000000",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        fontSize: "8px",
+        fontWeight: "bold",
+        pointerEvents: "none",
+        zIndex: 9999,
+        transition: "transform 0.15s ease-out, width 0.2s ease, height 0.2s ease, opacity 0.2s ease",
+      }}
+    >
+      {isHovered && hoverText ? hoverText : null}
+    </div>
+  );
 }
 """,
         )
@@ -1453,6 +1910,50 @@ export default function ContactPage() {{
 """,
         )
 
+    def _find_nav_and_footer(self) -> tuple[Optional[str], Optional[str]]:
+        pages = self.ir.get("pages", [])
+        page_components = pages[0].get("components", []) if pages else []
+
+        comp_items: list[tuple[str, str]] = []
+        for item in page_components:
+            if isinstance(item, dict):
+                comp_items.append((item.get("name", ""), item.get("role", "")))
+            elif isinstance(item, str):
+                comp_items.append((item, ""))
+
+        nav_name: Optional[str] = None
+        footer_name: Optional[str] = None
+
+        for name, role in comp_items:
+            if not name:
+                continue
+            nl = name.lower()
+            if role in ("navigation", "header") or nl in ("nav", "navbar", "headernavigation", "header", "navigation"):
+                nav_name = name
+                break
+        if not nav_name:
+            for name, _ in comp_items:
+                nl = name.lower()
+                if "nav" in nl or "header" in nl:
+                    nav_name = name
+                    break
+
+        for name, role in comp_items:
+            if not name:
+                continue
+            nl = name.lower()
+            if role == "footer" or nl in ("footer", "sitefooter", "pagefooter"):
+                footer_name = name
+                break
+        if not footer_name:
+            for name, _ in comp_items:
+                nl = name.lower()
+                if "footer" in nl:
+                    footer_name = name
+                    break
+
+        return nav_name, footer_name
+
     def _write_work_index_page(self):
         pages = self.ir.get("pages", [])
         matched = next((p for p in pages if p.get("route") in ("/work", "work")), None)
@@ -1461,8 +1962,6 @@ export default function ContactPage() {{
             self._text(
                 "app/work/page.tsx",
                 f"""import React from "react";
-import HeaderNavigation from "../../components/HeaderNavigation";
-import Footer from "../../components/Footer";
 
 export default function WorkIndexPage() {{
   return (
@@ -1474,6 +1973,12 @@ export default function WorkIndexPage() {{
 """,
             )
             return
+
+        nav_name, footer_name = self._find_nav_and_footer()
+        nav_import = f'import {nav_name} from "../../components/{nav_name}";\n' if nav_name else ""
+        nav_tag = f"      <{nav_name} />\n" if nav_name else ""
+        footer_import = f'import {footer_name} from "../../components/{footer_name}";\n' if footer_name else ""
+        footer_tag = f"      <{footer_name} />\n" if footer_name else ""
 
         projects = self.ir.get("data", {}).get("projects", [])
         project_cards = []
@@ -1499,14 +2004,11 @@ export default function WorkIndexPage() {{
         self._text(
             "app/work/page.tsx",
             f"""import React from "react";
-import HeaderNavigation from "../../components/HeaderNavigation";
-import Footer from "../../components/Footer";
-
+{nav_import}{footer_import}
 export default function WorkIndexPage() {{
   return (
     <main>
-      <HeaderNavigation />
-      <section style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "70vh" }}}}>
+{nav_tag}      <section style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "70vh" }}}}>
         <p style={{{{ fontFamily: "var(--font-mono, monospace)", fontSize: "14px", letterSpacing: "0.1em", opacity: 0.7, marginBottom: "16px" }}}}>// PORTFOLIO</p>
         <h1 style={{{{ fontFamily: "var(--font-display)", fontSize: "clamp(40px, 6vw, 72px)", fontWeight: 700, margin: "0 0 32px 0" }}}}>
           Selected Work
@@ -1515,57 +2017,58 @@ export default function WorkIndexPage() {{
 {cards_markup}
         </div>
       </section>
-      <Footer />
-    </main>
+{footer_tag}    </main>
   );
 }}
 """,
         )
 
     def _write_work_dynamic_page(self):
+        nav_name, footer_name = self._find_nav_and_footer()
+        nav_import = f'import {nav_name} from "../../../components/{nav_name}";\n' if nav_name else ""
+        nav_tag = f"      <{nav_name} />\n" if nav_name else ""
+        footer_import = f'import {footer_name} from "../../../components/{footer_name}";\n' if footer_name else ""
+        footer_tag = f"      <{footer_name} />\n" if footer_name else ""
+
         self._text(
             "app/work/[slug]/page.tsx",
-            """import React from "react";
-import HeaderNavigation from "../../../components/HeaderNavigation";
-import Footer from "../../../components/Footer";
-import { projects } from "../../../data/projects";
+            f"""import React from "react";
+{nav_import}{footer_import}import {{ projects }} from "../../../data/projects";
 
-type WorkPageProps = {
-  params: Promise<{ slug: string }>;
-};
+type WorkPageProps = {{
+  params: Promise<{{ slug: string }}>;
+}};
 
-export default async function DynamicWorkPage({ params }: WorkPageProps) {
-  const { slug } = await params;
+export default async function DynamicWorkPage({{ params }}: WorkPageProps) {{
+  const {{ slug }} = await params;
   const proj = projects.find(
     (p: any) => p.slug === slug || p.title.toLowerCase().replace(/\\s+/g, "-") === slug
   );
   const title = proj?.title || slug.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
-  const desc = proj?.description || `Case study for ${title}.`;
+  const desc = proj?.description || `Case study for ${{title}}.`;
   const image = proj?.image;
 
   return (
     <main>
-      <HeaderNavigation />
-      <article style={{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "70vh" }}>
-        <div style={{ marginBottom: "24px" }}>
-          <a href="/" style={{ opacity: 0.6, textDecoration: "none", fontSize: "14px", fontFamily: "var(--font-mono, monospace)" }}>
+{nav_tag}      <article style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "70vh" }}}}>
+        <div style={{{{ marginBottom: "24px" }}}}>
+          <a href="/" style={{{{ opacity: 0.6, textDecoration: "none", fontSize: "14px", fontFamily: "var(--font-mono, monospace)" }}}}>
             ← Back to Overview
           </a>
         </div>
-        <h1 style={{ fontFamily: "var(--font-display)", fontSize: "clamp(40px, 6vw, 72px)", fontWeight: 700, margin: "0 0 24px 0" }}>
-          {title}
+        <h1 style={{{{ fontFamily: "var(--font-display)", fontSize: "clamp(40px, 6vw, 72px)", fontWeight: 700, margin: "0 0 24px 0" }}}}>
+          {{title}}
         </h1>
-        <p style={{ fontFamily: "var(--font-body)", fontSize: "20px", opacity: 0.8, lineHeight: 1.6, maxWidth: "720px" }}>
-          {desc}
+        <p style={{{{ fontFamily: "var(--font-body)", fontSize: "20px", opacity: 0.8, lineHeight: 1.6, maxWidth: "720px" }}}}>
+          {{desc}}
         </p>
-        {image && (
-          <img src={image} alt={title} style={{ width: "100%", maxHeight: "640px", objectFit: "cover", borderRadius: "16px", margin: "40px 0" }} />
-        )}
+        {{image && (
+          <img src={{image}} alt={{title}} style={{{{ width: "100%", maxHeight: "640px", objectFit: "cover", borderRadius: "16px", margin: "40px 0" }}}} />
+        )}}
       </article>
-      <Footer />
-    </main>
+{footer_tag}    </main>
   );
-}
+}}
 """,
         )
 
@@ -1580,8 +2083,6 @@ export default async function DynamicWorkPage({ params }: WorkPageProps) {
             self._text(
                 f"app/work/{slug}/page.tsx",
                 f"""import React from "react";
-import HeaderNavigation from "../../../components/HeaderNavigation";
-import Footer from "../../../components/Footer";
 
 export default function WorkPage() {{
   return (
@@ -1593,6 +2094,12 @@ export default function WorkPage() {{
 """,
             )
             return
+
+        nav_name, footer_name = self._find_nav_and_footer()
+        nav_import = f'import {nav_name} from "../../../components/{nav_name}";\n' if nav_name else ""
+        nav_tag = f"      <{nav_name} />\n" if nav_name else ""
+        footer_import = f'import {footer_name} from "../../../components/{footer_name}";\n' if footer_name else ""
+        footer_tag = f"      <{footer_name} />\n" if footer_name else ""
 
         projects = self.ir.get("data", {}).get("projects", [])
         proj = next((p for p in projects if p.get("slug") == slug or self._slugify(p.get("title", "")) == slug), None)
@@ -1609,14 +2116,11 @@ export default function WorkPage() {{
         self._text(
             f"app/work/{slug}/page.tsx",
             f"""import React from "react";
-import HeaderNavigation from "../../../components/HeaderNavigation";
-import Footer from "../../../components/Footer";
-
+{nav_import}{footer_import}
 export default function WorkPage() {{
   return (
     <main>
-      <HeaderNavigation />
-      <article style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "70vh" }}}}>
+{nav_tag}      <article style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "70vh" }}}}>
         <div style={{{{ marginBottom: "24px" }}}}>
           <a href="/" style={{{{ opacity: 0.6, textDecoration: "none", fontSize: "14px", fontFamily: "var(--font-mono, monospace)" }}}}>
             ← Back to Overview
@@ -1636,8 +2140,7 @@ export default function WorkPage() {{
         </div>
         {img_markup}
       </article>
-      <Footer />
-    </main>
+{footer_tag}    </main>
   );
 }}
 """,
@@ -1884,11 +2387,43 @@ export const toolkit: ToolkitSkill[] = """
     def _project_name() -> str:
         return "reconstructed-site"
 
+    def _resolve_component_imports(self, relative: str, content: str) -> str:
+        if not relative.endswith((".tsx", ".jsx", ".ts", ".js")):
+            return content
+
+        parts = Path(relative).parts[:-1]
+
+        def get_rel_import(target_comp: str) -> str:
+            if not parts or parts == (".",):
+                return f"./components/{target_comp}"
+            if parts[0] == "components":
+                depth = len(parts) - 1
+                return ("../" * depth if depth > 0 else "./") + target_comp
+            depth = len(parts)
+            return ("../" * depth) + f"components/{target_comp}"
+
+        runtime_components = ["LiveClock", "CursorRuntime", "InteractionRuntime", "MotionRuntime", "RouteTransition"]
+
+        for comp in runtime_components:
+            if relative == f"components/{comp}.tsx":
+                continue
+            if re.search(rf"<\s*{comp}\b", content) and not re.search(rf"\bimport\b.*\b{comp}\b", content):
+                import_path = get_rel_import(comp)
+                import_stmt = f'import {comp} from "{import_path}";\n'
+                if content.startswith('"use client"') or content.startswith("'use client'"):
+                    lines = content.split("\n", 1)
+                    content = lines[0] + "\n" + import_stmt + (lines[1] if len(lines) > 1 else "")
+                else:
+                    content = import_stmt + content
+
+        return content
+
     def _text(
         self,
         relative: str,
         content: str,
     ):
+        content = self._resolve_component_imports(relative, content)
         path = self.output / relative
         path.parent.mkdir(
             parents=True,
@@ -1911,3 +2446,4 @@ export const toolkit: ToolkitSkill[] = """
                 indent=2,
             ),
         )
+

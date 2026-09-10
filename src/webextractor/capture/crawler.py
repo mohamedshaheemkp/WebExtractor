@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
 
+from .behavior import BehaviorProbe
 from .browser import BrowserCapture
 from .multi_viewport import MultiViewportCapture
 from .snapshot import SnapshotWriter
@@ -158,9 +159,22 @@ class WebsiteCrawler:
                 vp_results = await multi_vp.capture_all(browser.context, root_url)
                 primary_capture["viewports"] = vp_results.get("viewports", {})
                 primary_capture["responsive_rules"] = vp_results.get("responsive_rules", [])
+
+                # Run Behavioral Evidence Probe on root page
+                try:
+                    probe_page = await browser.context.new_page()
+                    await probe_page.goto(root_url, wait_until="domcontentloaded", timeout=30_000)
+                    await probe_page.wait_for_timeout(2000)
+                    probe = BehaviorProbe()
+                    discovered_interactions = await probe.probe_page(probe_page)
+                    primary_capture["interactions"] = discovered_interactions
+                    await probe_page.close()
+                except Exception:
+                    primary_capture["interactions"] = []
             else:
                 primary_capture["viewports"] = {}
                 primary_capture["responsive_rules"] = []
+                primary_capture["interactions"] = []
 
             primary_capture["pages"] = captured_pages
             primary_capture["routes"] = [p["route"] for p in captured_pages]

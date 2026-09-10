@@ -218,14 +218,25 @@ class DomToJsxEmitter:
             )
 
             if not raw_name:
-                # Use semantic tag as basis for generic name
-                if s_tag in ("header", "nav"):
+                classes = s.get("classes", [])
+                classes_str = " ".join(classes).lower()
+                if "hero" in classes_str:
+                    raw_name = "Hero"
+                elif "intro" in classes_str:
+                    raw_name = "Intro"
+                elif "project" in classes_str:
+                    raw_name = "Projects"
+                elif s_tag in ("header", "nav") or "header" in classes_str or "nav" in classes_str:
                     raw_name = "Header" if not raw_id else raw_id
-                elif s_tag == "footer":
+                elif s_tag == "footer" or "footer" in classes_str:
                     raw_name = "Footer" if not raw_id else raw_id
                 elif raw_id:
-                    # Use the element's own ID for the name
-                    raw_name = raw_id
+                    if raw_id.lower() == "voice":
+                        raw_name = "VoiceOfMS"
+                    elif raw_id.lower() in ("contact", "get-in-touch") and idx >= len(raw_sections) - 2:
+                        raw_name = "CTA"
+                    else:
+                        raw_name = raw_id
                 else:
                     # Indexed fallback — no content guessing
                     raw_name = f"Section_{idx + 1:02d}"
