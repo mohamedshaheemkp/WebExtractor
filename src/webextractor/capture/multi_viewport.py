@@ -128,7 +128,7 @@ class MultiViewportCapture:
         return await page.evaluate(
             """
             () => {
-                function extract(element, depth = 0) {
+                function extract(element, depth = 0, path = "0") {
                     if (!element || depth > 20) return null;
                     const rect = element.getBoundingClientRect();
                     const style = window.getComputedStyle(element);
