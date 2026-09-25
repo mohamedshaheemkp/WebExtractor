@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -34,6 +35,24 @@ class AssetDownloader:
             if not clean_part:
                 clean_part = "file"
             sanitized_parts.append(clean_part)
+
+        # Preserve variant transformation parameters so variants never overwrite each other
+        variant_suffix = ""
+        if parsed.query:
+            m = re.search(r"(?:scale-down-to|width|w|size)=(\d+)", parsed.query, re.IGNORECASE)
+            if m:
+                variant_suffix = f"@{m.group(1)}"
+            elif parsed.query.strip():
+                q_hash = abs(hash(parsed.query)) % 10000
+                variant_suffix = f"_{q_hash}"
+
+        if variant_suffix and sanitized_parts:
+            last = sanitized_parts[-1]
+            if "." in last:
+                stem, ext = last.rsplit(".", 1)
+                sanitized_parts[-1] = f"{stem}{variant_suffix}.{ext}"
+            else:
+                sanitized_parts[-1] = f"{last}{variant_suffix}"
 
         file_path = output_dir / domain / Path(*sanitized_parts)
         file_path.parent.mkdir(parents=True, exist_ok=True)

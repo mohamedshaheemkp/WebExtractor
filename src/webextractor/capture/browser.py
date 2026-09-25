@@ -153,13 +153,13 @@ class BrowserCapture:
                             el.setAttribute('data-motion-id', id);
                             let easing = null;
                             let duration = null;
-                            if (cs.transitionDuration && cs.transitionDuration !== '0s') {
+                            if (cs.transitionDuration) {
                                 duration = cs.transitionDuration;
-                                if (cs.transitionTimingFunction && cs.transitionTimingFunction !== 'ease') {
+                                if (cs.transitionTimingFunction) {
                                     easing = cs.transitionTimingFunction;
                                 }
                             }
-                            if (!easing && cs.animationTimingFunction && cs.animationTimingFunction !== 'ease') {
+                            if (!easing && cs.animationTimingFunction) {
                                 easing = cs.animationTimingFunction;
                             }
                             results.push({
@@ -270,11 +270,6 @@ class BrowserCapture:
 
                         classes: Array.from(element.classList),
 
-                        attributes: {
-                            'data-framer-appear-id': element.getAttribute('data-framer-appear-id') || null,
-                            'data-motion-id': element.getAttribute('data-motion-id') || null,
-                            'data-aos': element.getAttribute('data-aos') || null,
-                        },
 
                         role:
                             element.getAttribute("role"),
@@ -364,6 +359,7 @@ class BrowserCapture:
                             letterSpacing: style.letterSpacing,
                             textTransform: style.textTransform,
                             textDecoration: style.textDecorationLine || style.textDecoration,
+                            transition: style.transition,
                             transitionProperty: style.transitionProperty,
                             transitionDuration: style.transitionDuration,
                             transitionTimingFunction: style.transitionTimingFunction,

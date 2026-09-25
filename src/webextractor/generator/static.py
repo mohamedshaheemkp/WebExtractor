@@ -32,7 +32,7 @@ class StaticProjectGenerator:
 
         self.output = Path(output_dir)
         self.asset_bindings = self.ir.get("asset_bindings", [])
-        # Map source URLs and public/ paths to static ./assets/ paths
+        # Map source URLs and public/ paths to static assets/ paths
         self.asset_map: dict[str, str] = {}
         for b in self.asset_bindings:
             src = b.get("source_url")
@@ -44,6 +44,13 @@ class StaticProjectGenerator:
                 if src:
                     self.asset_map[src] = clean_lp
                 self.asset_map[lp] = clean_lp
+            for v in b.get("variants", []):
+                v_lp = v.get("local_path")
+                if v_lp:
+                    clean_v = v_lp.lstrip("/").replace("public/", "assets/")
+                    if not clean_v.startswith("assets/"):
+                        clean_v = f"assets/{clean_v}"
+                    self.asset_map[v_lp] = clean_v
 
     def generate(self) -> Path:
         self._create_structure()
@@ -82,11 +89,23 @@ class StaticProjectGenerator:
         if raw_url in self.asset_map:
             return self.asset_map[raw_url]
         for k, v in self.asset_map.items():
-            if k and raw_url.endswith(k) or (k in raw_url):
+            if k and (raw_url == k or raw_url.endswith(k) or (k in raw_url)):
                 return v
+        if raw_url.startswith("public/"):
+            return f"assets/{raw_url[7:]}"
         if raw_url.startswith("/"):
             return f"assets{raw_url}"
         return raw_url
+
+    def _find_bound_variants(self, raw_src: str | None) -> list[dict[str, Any]]:
+        if not raw_src:
+            return []
+        clean_src = raw_src.split("?")[0]
+        for b in self.asset_bindings:
+            s_url = b.get("source_url", "")
+            if s_url == raw_src or s_url.split("?")[0] == clean_src:
+                return b.get("variants", [])
+        return []
 
     def _write_tokens(self) -> None:
         design = self.ir.get("design_system", {})
@@ -150,7 +169,6 @@ class StaticProjectGenerator:
             '  color: var(--color-foreground, #f5f5f5);',
             '  font-family: var(--font-body, system-ui, -apple-system, sans-serif);',
             '  line-height: 1.6;',
-            '  overflow-x: hidden;',
             '}',
             '',
             'img, video, svg {',
@@ -203,8 +221,8 @@ class StaticProjectGenerator:
         if element_transitions:
             css_lines.append('\n/* Element Transitions (Preserved Curves) */')
             for sel, t_cfg in element_transitions.items():
-                tf = t_cfg.get("timing_function") or t_cfg.get("easing") or t_cfg.get("ease")
-                d_val = t_cfg.get("duration", 0.3)
+                tf = t_cfg.get("timing_function") or t_cfg.get("easing") or t_cfg.get("ease") or easing
+                d_val = t_cfg.get("duration") if t_cfg.get("duration") is not None else dur
                 if tf:
                     css_lines.extend([
                         f'{sel} {{',
@@ -231,7 +249,7 @@ class StaticProjectGenerator:
                 continue
 
             # Convert raw synthetic keys like div_None_class into valid CSS classes if needed
-            if "_" in sel and not (sel.startswith(".") or sel.startswith("#")):
+            if "_" in sel and not (sel.startswith(".") or sel.startswith("#") or sel.startswith("[")):
                 parts = sel.split("_")
                 if len(parts) >= 3 and parts[2].strip():
                     sel = "." + ".".join(parts[2].strip().split())
@@ -253,27 +271,11 @@ class StaticProjectGenerator:
             if prop_lines:
                 media_blocks.setdefault(mq, []).append(f"  {sel} {{\n" + "\n".join(prop_lines) + "\n  }")
 
-        # Fallback to source_rules media rules if responsive_rules was empty
-        if media_rules and not media_blocks:
-            css_lines.append('\n/* Extracted Responsive Rules */')
-            css_lines.extend(media_rules)
-        else:
-            # Baseline mobile responsiveness protections
-            if "@media (max-width: 768px)" not in media_blocks:
-                media_blocks["@media (max-width: 768px)"] = []
-            media_blocks["@media (max-width: 768px)"].insert(0, """  html, body {
-    max-width: 100vw;
-  }
-  .wx-container {
-    padding: 0 16px;
-    max-width: 100%;
-  }""")
-
-            for mq, rules in sorted(media_blocks.items()):
-                css_lines.append(f"\n/* Responsive Breakpoint: {mq} */")
-                css_lines.append(f"{mq} {{")
-                css_lines.extend(rules)
-                css_lines.append("}")
+        for mq, rules in sorted(media_blocks.items()):
+            css_lines.append(f"\n/* Responsive Breakpoint: {mq} */")
+            css_lines.append(f"{mq} {{")
+            css_lines.extend(rules)
+            css_lines.append("}")
 
         if media_rules:
             css_lines.append("\n/* Source Extracted Responsive Media Rules */")
@@ -361,18 +363,50 @@ class StaticProjectGenerator:
             attr_strs.append(f'class="{html.escape(class_str)}"')
 
         has_style = False
+        has_srcset = False
         for k, v in attrs.items():
-            if k.lower() in ("id", "class", "classname"):
+            k_low = k.lower()
+            if k_low in ("id", "class", "classname"):
                 continue
-            if k.lower() == "style":
+            if k_low == "style":
                 has_style = True
                 v_str = self._resolve_asset_url(str(v))
                 attr_strs.append(f'style="{html.escape(v_str)}"')
                 continue
             v_str = str(v)
-            if k.lower() in ("src", "href", "poster", "srcset"):
+            if k_low == "srcset":
+                has_srcset = True
+                parts = [p.strip() for p in v_str.split(",") if p.strip()]
+                resolved_parts = []
+                for p in parts:
+                    sub = p.split()
+                    if sub:
+                        res_url = self._resolve_asset_url(sub[0])
+                        w_desc = f" {sub[1]}" if len(sub) > 1 else ""
+                        resolved_parts.append(f"{res_url}{w_desc}")
+                attr_strs.append(f'srcset="{html.escape(", ".join(resolved_parts))}"')
+                continue
+            if k_low in ("src", "href", "poster"):
                 v_str = self._resolve_asset_url(v_str)
             attr_strs.append(f'{k}="{html.escape(v_str)}"')
+
+        # If img has genuine variants and no explicit srcset, emit evidence-based srcset
+        if tag == "img" and not has_srcset:
+            img_src = attrs.get("src") or node.get("src")
+            if img_src:
+                variants = self._find_bound_variants(str(img_src))
+                if len(variants) > 1:
+                    cand_strs = []
+                    for v in variants:
+                        v_loc = v.get("local_path")
+                        v_w = v.get("width")
+                        if v_loc and v_w:
+                            res_loc = self._resolve_asset_url(v_loc)
+                            cand_strs.append(f"{res_loc} {v_w}w")
+                    if cand_strs:
+                        attr_strs.append(f'srcset="{html.escape(", ".join(cand_strs))}"')
+                        if "sizes" not in [ak.lower() for ak in attrs.keys()]:
+                            attr_strs.append('sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"')
 
         # Only if node had no explicit style attribute and has explicit motion styles (opacity or transform), preserve them
         if not has_style:

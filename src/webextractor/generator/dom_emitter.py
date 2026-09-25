@@ -412,7 +412,7 @@ class DomToJsxEmitter:
             if ak_lower == "style":
                 style_jsx = self._parse_style_attribute(av_str, is_motion_element=is_motion_element)
                 continue
-            if ak_lower == "src" and tag in ("img", "video"):
+            if (ak_lower == "src" and tag in ("img", "video")) or (ak_lower in ("srcset", "sizes") and tag == "img"):
                 continue
             if ak_lower.startswith("on") or ak_lower.startswith("javascript:"):
                 continue
@@ -456,7 +456,38 @@ class DomToJsxEmitter:
             src_attr = f' src="{src}"' if src else ""
             has_alt = any(k.lower() == "alt" for k in node_attrs)
             alt_attr = "" if has_alt else ' alt=""'
-            return f"{indent}<img{tag_attrs}{src_attr}{alt_attr} />\n"
+
+            srcset_attr = ""
+            sizes_attr = ""
+            raw_srcset = node_attrs.get("srcset") or node_attrs.get("srcSet")
+            if raw_srcset:
+                parts = [p.strip() for p in str(raw_srcset).split(",") if p.strip()]
+                res_cands = []
+                for p in parts:
+                    sub = p.split()
+                    if sub:
+                        c_url = self._resolve_single_url(sub[0])
+                        w_desc = f" {sub[1]}" if len(sub) > 1 else ""
+                        res_cands.append(f"{c_url}{w_desc}")
+                if res_cands:
+                    srcset_attr = f' srcSet="{", ".join(res_cands)}"'
+                    raw_sizes = node_attrs.get("sizes")
+                    if raw_sizes:
+                        sizes_attr = f' sizes="{html.escape(str(raw_sizes))}"'
+            else:
+                variants = self._find_bound_variants(node)
+                if len(variants) > 1:
+                    cand_strs = []
+                    for v in variants:
+                        v_loc = v.get("local_path")
+                        v_w = v.get("width")
+                        if v_loc and v_w:
+                            cand_strs.append(f"{v_loc} {v_w}w")
+                    if cand_strs:
+                        srcset_attr = f' srcSet="{", ".join(cand_strs)}"'
+                        sizes_attr = ' sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"'
+
+            return f"{indent}<img{tag_attrs}{src_attr}{srcset_attr}{sizes_attr}{alt_attr} />\n"
 
         if tag == "video":
             src = self._resolve_video_src(node)
@@ -646,6 +677,26 @@ class DomToJsxEmitter:
             return resolved
 
         return raw_src if isinstance(raw_src, str) else None
+
+    def _find_bound_variants(self, node: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_src = node.get("src") or node.get("attributes", {}).get("src")
+        if not raw_src or not isinstance(raw_src, str):
+            return []
+        clean_src = raw_src.split("?")[0]
+        for b in self.asset_bindings:
+            s_url = b.get("source_url", "")
+            if s_url == raw_src or s_url.split("?")[0] == clean_src:
+                return b.get("variants", [])
+        return []
+
+    def _resolve_single_url(self, url: str) -> str:
+        clean_url = url.split("?")[0]
+        for b in self.asset_bindings:
+            s_url = b.get("source_url", "")
+            if s_url == url or s_url.split("?")[0] == clean_url:
+                if b.get("local_path"):
+                    return b["local_path"]
+        return url
 
     def _resolve_video_src(self, node: dict[str, Any]) -> str | None:
         """Resolves real video source from asset_bindings."""

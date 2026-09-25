@@ -128,7 +128,63 @@ class TestValidationEngine(unittest.TestCase):
         self.assertEqual(assessment["categories"]["layout"]["status"], "PASS")
         self.assertEqual(assessment["categories"]["layout"]["matched_components"], 3)
         self.assertEqual(assessment["categories"]["typography"]["status"], "PASS")
-        self.assertEqual(assessment["status"], "PASS")
+        # Visual is NOT_RUN when no comparison evidence is passed; overall status must NEVER become PASS without comparison evidence!
+        self.assertEqual(assessment["categories"]["visual"]["status"], "NOT_RUN")
+        self.assertEqual(assessment["status"], "NOT_RUN")
+
+    def test_fidelity_evaluation_with_actual_visual_evidence(self):
+        """Validates that PASS status requires real visual comparison evidence, and tests BLOCKED and FAIL."""
+        out_dir = self.path / "test_project_visual"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "components").mkdir(parents=True, exist_ok=True)
+        (out_dir / "public").mkdir(parents=True, exist_ok=True)
+        (out_dir / "styles").mkdir(parents=True, exist_ok=True)
+
+        (out_dir / "styles" / "tokens.css").write_text(
+            ":root { --font-display: Inter; --font-body: Inter; --color-bg: #000; --container-max-width: 1200px; }",
+            encoding="utf-8",
+        )
+        (out_dir / "components" / "Header.tsx").write_text("export default function Header() {}", encoding="utf-8")
+        (out_dir / "components" / "Hero.tsx").write_text("export default function Hero() {}", encoding="utf-8")
+        (out_dir / "components" / "Footer.tsx").write_text("export default function Footer() {}", encoding="utf-8")
+
+        mock_ir = {
+            "pages": [{"components": ["Header", "Hero", "Footer"]}],
+            "design_system": {"colors": {"bg": "#000"}},
+            "typography": {"font_families": [{"name": "Inter"}]},
+            "asset_bindings": [],
+            "responsive_rules": [],
+            "animations": {},
+            "interactions": [],
+        }
+
+        # 1. Authentic visual comparison with matching screenshots -> PASS
+        orig_img = self.path / "orig_desktop.png"
+        gen_img = self.path / "gen_desktop.png"
+        png_bytes = create_mock_png(20, 20, (10, 20, 30))
+        orig_img.write_bytes(png_bytes)
+        gen_img.write_bytes(png_bytes)
+
+        orig_cap = {"screenshots": {"desktop": str(orig_img)}}
+        gen_cap = {"screenshots": {"desktop": str(gen_img)}}
+
+        res_pass = VisualDiffScorer.evaluate_fidelity(out_dir, mock_ir, orig_cap, gen_cap)
+        self.assertEqual(res_pass["categories"]["visual"]["status"], "PASS")
+        self.assertEqual(res_pass["status"], "PASS")
+
+        # 2. Blocked visual comparison -> BLOCKED
+        blocked_cap = {"status": "BLOCKED", "error": "Build failed"}
+        res_blocked = VisualDiffScorer.evaluate_fidelity(out_dir, mock_ir, orig_cap, blocked_cap)
+        self.assertEqual(res_blocked["categories"]["visual"]["status"], "BLOCKED")
+        self.assertEqual(res_blocked["status"], "BLOCKED")
+
+        # 3. Differing screenshots failing visual diff -> FAIL
+        differing_img = self.path / "gen_diff.png"
+        differing_img.write_bytes(create_mock_png(20, 20, (255, 255, 255)))
+        diff_cap = {"screenshots": {"desktop": str(differing_img)}}
+        res_fail = VisualDiffScorer.evaluate_fidelity(out_dir, mock_ir, orig_cap, diff_cap)
+        self.assertEqual(res_fail["categories"]["visual"]["status"], "FAIL")
+        self.assertEqual(res_fail["status"], "FAIL")
 
     def test_verification_report_generation(self):
         """Validates that VerificationReport writes structured JSON with categorical breakdown."""

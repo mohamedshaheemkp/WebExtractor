@@ -41,32 +41,58 @@ class AssetOrganizer:
                 asset.public_url = None
                 continue
 
-            # Strict evidence-based categorization: MIME type, Content-Type, and extension
+            # Strict evidence-based categorization: MIME type is authoritative over extension
             ext = (asset.extension or Path(urlparse(asset.url).path).suffix.lstrip(".")).lower()
-            mime = (asset.mime_type or "").lower()
+            mime = (asset.mime_type or "").lower().split(";")[0].strip()
 
-            if ext in ("js", "mjs", "ts", "jsx", "tsx", "cjs") or "javascript" in mime or "ecmascript" in mime:
+            # 1. Authoritative MIME type mapping
+            if "javascript" in mime or "ecmascript" in mime:
                 target_folder = public_dir / "scripts"
                 asset.asset_type = AssetType.JAVASCRIPT
-            elif ext in ("css",) or "css" in mime:
+            elif "text/css" in mime or mime == "css":
                 target_folder = public_dir / "styles"
                 asset.asset_type = AssetType.CSS
-            elif ext in ("html", "htm", "framercms") or "html" in mime:
+            elif "text/html" in mime:
                 target_folder = public_dir / "documents"
                 asset.asset_type = AssetType.HTML
-            elif ext in ("woff", "woff2", "ttf", "otf", "eot") or "font" in mime:
+            elif "font" in mime or mime.startswith("application/font") or mime.startswith("application/x-font"):
                 target_folder = public_dir / "fonts"
                 asset.asset_type = AssetType.FONT
-            elif ext in ("mp4", "webm", "ogg", "mov") or "video" in mime:
+            elif mime.startswith("video/"):
                 target_folder = public_dir / "videos"
                 asset.asset_type = AssetType.VIDEO
-            elif ext in ("svg",) or "svg" in mime:
+            elif "image/svg" in mime or mime == "svg":
                 target_folder = public_dir / "icons"
                 asset.asset_type = AssetType.IMAGE
-            elif ext in ("png", "jpg", "jpeg", "webp", "gif", "ico", "avif") or "image" in mime:
+            elif mime.startswith("image/"):
                 target_folder = public_dir / "images"
                 asset.asset_type = AssetType.IMAGE
-            elif ext in ("pdf", "txt", "xml", "json", "doc", "docx") or "pdf" in mime or "json" in mime:
+            elif "application/pdf" in mime or "application/json" in mime:
+                target_folder = public_dir / "documents"
+                asset.asset_type = AssetType.DOCUMENT
+            # 2. Extension fallback when MIME is generic or absent
+            elif ext in ("js", "mjs", "ts", "jsx", "tsx", "cjs"):
+                target_folder = public_dir / "scripts"
+                asset.asset_type = AssetType.JAVASCRIPT
+            elif ext in ("css",):
+                target_folder = public_dir / "styles"
+                asset.asset_type = AssetType.CSS
+            elif ext in ("html", "htm", "framercms"):
+                target_folder = public_dir / "documents"
+                asset.asset_type = AssetType.HTML
+            elif ext in ("woff", "woff2", "ttf", "otf", "eot"):
+                target_folder = public_dir / "fonts"
+                asset.asset_type = AssetType.FONT
+            elif ext in ("mp4", "webm", "ogg", "mov"):
+                target_folder = public_dir / "videos"
+                asset.asset_type = AssetType.VIDEO
+            elif ext in ("svg",):
+                target_folder = public_dir / "icons"
+                asset.asset_type = AssetType.IMAGE
+            elif ext in ("png", "jpg", "jpeg", "webp", "gif", "ico", "avif"):
+                target_folder = public_dir / "images"
+                asset.asset_type = AssetType.IMAGE
+            elif ext in ("pdf", "txt", "xml", "json", "doc", "docx"):
                 target_folder = public_dir / "documents"
                 asset.asset_type = AssetType.DOCUMENT
             else:
@@ -74,9 +100,16 @@ class AssetOrganizer:
 
             folder_name = target_folder.name
 
-            # Determine clean, collision-free filename
+            # Determine clean, collision-free filename preserving variant transformation evidence
             base_filename = asset.filename or Path(urlparse(asset.url).path).name or "asset.bin"
-            clean_name = "".join(c for c in base_filename if c.isalnum() or c in ".-_")
+            parsed_q = urlparse(asset.url).query
+            if parsed_q and "@" not in base_filename:
+                m = re.search(r"(?:scale-down-to|width|w|size)=(\d+)", parsed_q, re.IGNORECASE)
+                if m:
+                    stem, f_ext = (base_filename.rsplit(".", 1) if "." in base_filename else (base_filename, ""))
+                    base_filename = f"{stem}@{m.group(1)}{('.' + f_ext) if f_ext else ''}"
+
+            clean_name = "".join(c for c in base_filename if c.isalnum() or c in ".-_@")
             if not clean_name:
                 clean_name = f"asset_{abs(hash(asset.url)) % 100000}"
                 if asset.extension:

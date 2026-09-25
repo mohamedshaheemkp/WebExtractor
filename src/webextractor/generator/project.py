@@ -557,13 +557,7 @@ export default function RootLayout({{
             media_block += "\n@media (max-width: 1024px) {\n" + "\n\n".join(tablet_media_rules) + "\n}\n"
         if mobile_media_rules:
             media_block += "\n@media (max-width: 768px) {\n" + "\n\n".join(mobile_media_rules) + "\n}\n"
-        # Emit element transitions (with preserved cubic-bezier / steps timing functions)
-        element_transitions = self.ir.get("animations", {}).get("element_transitions", {})
-        for sel, t_cfg in element_transitions.items():
-            tf = t_cfg.get("timing_function") or t_cfg.get("easing") or t_cfg.get("ease")
-            dur = t_cfg.get("duration", 0.3)
-            if tf:
-                style_rules.append(f"{sel} {{\n  transition: all {dur}s {tf} !important;\n}}")
+
 
         # Process authoritative responsive rules from SiteIR
         responsive_rules = self.ir.get("responsive_rules", [])
@@ -575,7 +569,7 @@ export default function RootLayout({{
             if not sel or not r.get("diffs"):
                 continue
 
-            if "_" in sel and not (sel.startswith(".") or sel.startswith("#")):
+            if "_" in sel and not (sel.startswith(".") or sel.startswith("#") or sel.startswith("[")):
                 parts = sel.split("_")
                 if len(parts) >= 3 and parts[2].strip():
                     sel = "." + ".".join(parts[2].strip().split())
@@ -627,11 +621,13 @@ export default function RootLayout({{
         element_trans_block = ""
         if element_transitions:
             trans_rules = []
+            site_tf = self.ir.get("animations", {}).get("timing_function") or self.ir.get("animations", {}).get("default_timing_function") or self.ir.get("animations", {}).get("default_easing")
+            site_dur = self.ir.get("animations", {}).get("default_transition_duration", 0.3)
             for sel, t_cfg in element_transitions.items():
-                tf = t_cfg.get("timing_function") or t_cfg.get("easing") or t_cfg.get("ease")
-                d_val = t_cfg.get("duration", 0.3)
+                tf = t_cfg.get("timing_function") or t_cfg.get("easing") or t_cfg.get("ease") or site_tf
+                dur = t_cfg.get("duration") if t_cfg.get("duration") is not None else site_dur
                 if tf:
-                    trans_rules.append(f"{sel} {{\n  transition: all {d_val}s {tf} !important;\n}}")
+                    trans_rules.append(f"{sel} {{\n  transition: all {dur}s {tf} !important;\n}}")
             if trans_rules:
                 element_trans_block = "\n\n/* Element Transitions (Preserved Curves) */\n" + "\n\n".join(trans_rules)
 
@@ -1158,7 +1154,7 @@ export default function MotionRuntime({
             { opacity: initOpacity, transform: initTransform },
             { opacity: targetOpacity, transform: targetTransform },
           ];
-          const easing = transition.timing_function || transition.easing || transition.ease || (transition.type === "spring" ? "cubic-bezier(0.16, 1, 0.3, 1)" : defaultTimingFunction);
+          const easing = transition.timing_function || transition.easing || transition.ease || defaultTimingFunction || (transition.type === "spring" ? "cubic-bezier(0.16, 1, 0.3, 1)" : "cubic-bezier(0.25, 0.1, 0.25, 1)");
           const anim = el.animate(keyframes, {
             duration: durationMs,
             delay: delayMs,

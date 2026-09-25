@@ -179,3 +179,150 @@ def test_static_generator_emits_steps_into_styles_css(tmp_path: Path):
     assert ".stepped-box" in styles_css
     assert "transition: all 0.8s steps(4, end) !important;" in styles_css
     assert "transition: all 0.8s ease !important;" not in styles_css
+
+
+def test_timing_and_duration_spec_fidelity():
+    """
+    Verify exact parsing for:
+    - .3s, 0.3s, 1.2s, 0s
+    - cubic-bezier(0.44, 0, 0.56, 1)
+    - steps(4, jump-end)
+    - ease-in-out
+    - linear
+    - No confusion between duration and delay (e.g. 0s duration with 1.2s delay).
+    """
+    css = """
+    .case-zero-duration {
+        transition: opacity 0s linear 1.2s;
+    }
+    .case-leading-decimal {
+        transition: all .3s cubic-bezier(0.44, 0, 0.56, 1) 0.5s;
+    }
+    .case-standard-decimal {
+        transition: color 0.3s ease-in-out;
+    }
+    .case-steps-jump {
+        transition: transform 1.2s steps(4, jump-end);
+    }
+    """
+    adapter = StandardCssMotionAdapter()
+    result = adapter.extract_motion(html="", css=css)
+    et = result["element_transitions"]
+
+    # 1. Zero duration with delay: must NOT confuse 0s duration with 1.2s delay
+    zero_case = et[".case-zero-duration"]
+    assert zero_case["duration"] == 0.0
+    assert zero_case["delay"] == 1.2
+    assert zero_case["timing_function"] == "linear"
+
+    # 2. Leading decimal .3s: duration 0.3, delay 0.5, cubic-bezier
+    leading_case = et[".case-leading-decimal"]
+    assert leading_case["duration"] == 0.3
+    assert leading_case["delay"] == 0.5
+    assert leading_case["timing_function"] == "cubic-bezier(0.44, 0, 0.56, 1)"
+
+    # 3. Standard decimal 0.3s: duration 0.3, ease-in-out
+    std_case = et[".case-standard-decimal"]
+    assert std_case["duration"] == 0.3
+    assert std_case["timing_function"] == "ease-in-out"
+
+    # 4. 1.2s duration: steps(4, jump-end)
+    steps_case = et[".case-steps-jump"]
+    assert steps_case["duration"] == 1.2
+    assert steps_case["timing_function"] == "steps(4, jump-end)"
+
+
+def test_framer_fixture_capture_to_site_ir_survival(tmp_path: Path):
+    """
+    Verify known source timing functions survive end-to-end:
+    capture -> analyzer -> SiteIR -> site_ir.json
+    """
+    from webextractor.model.site_ir import SiteIR
+    import json
+
+    html = """
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>Framer App</title>
+        <style>
+          .hero-appear {
+            transition: transform 1.2s cubic-bezier(0.44, 0, 0.56, 1);
+          }
+        </style>
+        <script type="application/json">
+          {
+            "framer-hero-appear": {
+              "default": {
+                "initial": {"opacity": 0, "y": 20},
+                "animate": {
+                  "opacity": 1,
+                  "y": 0,
+                  "transition": {
+                    "duration": 1.2,
+                    "ease": [0.44, 0, 0.56, 1]
+                  }
+                }
+              }
+            }
+          }
+        </script>
+      </head>
+      <body>
+        <div id="hero" data-framer-appear-id="framer-hero-appear" class="hero-appear">
+          Hero Content
+        </div>
+      </body>
+    </html>
+    """
+
+    capture = {
+        "url": "https://test.framer.app/",
+        "html": html,
+        "css": ".hero-appear { transition: transform 1.2s cubic-bezier(0.44, 0, 0.56, 1); }",
+        "dom": {
+            "tag": "div",
+            "id": "hero",
+            "classes": ["hero-appear"],
+            "attributes": {
+                "data-framer-appear-id": "framer-hero-appear",
+            },
+            "styles": {
+                "transitionDuration": "1.2s",
+                "transitionTimingFunction": "cubic-bezier(0.44, 0, 0.56, 1)",
+            },
+            "children": [],
+        },
+        "viewports": {},
+    }
+
+    analyzer = SiteAnalyzer()
+    site_model = analyzer.analyze(capture)
+
+    site_ir = SiteIR(
+        metadata={"url": site_model.url, "title": site_model.title},
+        routes=site_model.routes,
+        design_system=getattr(site_model, "design_system", {}),
+        animations=getattr(site_model, "animations", {}),
+    )
+
+    site_ir.save(tmp_path / "analysis")
+    ir_file = tmp_path / "analysis" / "site_ir.json"
+    assert ir_file.exists()
+
+    with open(ir_file, "r", encoding="utf-8") as f:
+        saved_ir = json.load(f)
+
+    anims = saved_ir.get("animations", {})
+    # 1. Root timing function must be the source curve
+    assert anims.get("timing_function") == "cubic-bezier(0.44, 0, 0.56, 1)"
+    # 2. appear_animations must preserve the curve
+    appear_cfg = anims["appear_animations"]["framer-hero-appear"]
+    assert appear_cfg["transition"]["timing_function"] == "cubic-bezier(0.44, 0, 0.56, 1)"
+    assert appear_cfg["transition"]["duration"] == 1.2
+    # 3. motion_triggers must be updated
+    assert len(anims["motion_triggers"]) > 0
+    trigger = next(t for t in anims["motion_triggers"] if "framer-hero-appear" in t.get("target", "") or t.get("id") == "framer-hero-appear")
+    assert trigger["transition"]["timing_function"] == "cubic-bezier(0.44, 0, 0.56, 1)"
+    assert trigger["transition"]["duration"] == 1.2
+

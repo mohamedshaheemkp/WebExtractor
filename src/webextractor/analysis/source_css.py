@@ -172,11 +172,20 @@ def extract_relevant_css(
         top_level_rules, at_blocks = _parse_css_blocks(clean_css)
 
         def selector_matches_classes(sel: str) -> bool:
-            classes_in_sel = re.findall(r"\.([a-zA-Z0-9_\-]+)", sel)
-            for c in classes_in_sel:
-                if c in referenced_classes:
-                    return True
-            return False
+            sel_s = sel.strip()
+            if not sel_s:
+                return False
+            classes_in_sel = re.findall(r"\.([a-zA-Z0-9_\-]+)", sel_s)
+            if classes_in_sel:
+                for c in classes_in_sel:
+                    if c in referenced_classes:
+                        return True
+                return False
+            return any(sel_s.startswith(p) for p in (
+                ":root", "*", "html", "body", "nav", "header", "main", "footer", "section",
+                "article", "div", "span", "a", "button", "img", "svg", "p", "h1", "h2", "h3",
+                "h4", "h5", "h6", "[data-"
+            ))
 
         seen_rules = set()
 

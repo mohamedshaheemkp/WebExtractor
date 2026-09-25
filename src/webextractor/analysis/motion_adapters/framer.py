@@ -60,7 +60,11 @@ class FramerMotionAdapter(BaseMotionAdapter):
                                 transition = animate_target.get("transition", {})
 
                                 if isinstance(transition, dict):
-                                    ease_val = transition.get("ease")
+                                    ease_val = (
+                                        transition.get("ease")
+                                        or transition.get("easing")
+                                        or transition.get("timing_function")
+                                    )
                                     if isinstance(ease_val, list) and len(ease_val) == 4:
                                         tf = f"cubic-bezier({ease_val[0]}, {ease_val[1]}, {ease_val[2]}, {ease_val[3]})"
                                         transition["timing_function"] = tf
@@ -69,6 +73,17 @@ class FramerMotionAdapter(BaseMotionAdapter):
                                     elif isinstance(ease_val, str) and ease_val:
                                         transition["timing_function"] = ease_val
                                         transition["easing"] = ease_val
+                                        transition["ease"] = ease_val
+                                    elif "timing_function" in transition and isinstance(transition["timing_function"], str):
+                                        tf = transition["timing_function"]
+                                        transition["easing"] = tf
+                                        transition["ease"] = tf
+
+                                    if "duration" in transition:
+                                        try:
+                                            transition["duration"] = float(transition["duration"])
+                                        except (ValueError, TypeError):
+                                            pass
 
                                 clean_animate = {
                                     k: v for k, v in animate_target.items() if k != "transition"
@@ -90,6 +105,7 @@ class FramerMotionAdapter(BaseMotionAdapter):
                                 motion_triggers.append({
                                     "trigger": "mount",
                                     "target": f'[data-framer-appear-id="{appear_id}"]',
+                                    "id": appear_id,
                                     "initial": initial,
                                     "animate": clean_animate,
                                     "transition": transition,
@@ -120,18 +136,36 @@ class FramerMotionAdapter(BaseMotionAdapter):
                         except ValueError:
                             pass
 
+                trans_cfg: dict[str, Any] = {"type": "spring", "stiffness": 200, "damping": 40}
+                if "transition" in style:
+                    dur_m = re.search(r"(?:^|[^\w.])([0-9]*\.?[0-9]+)(m?s)(?=[^\w]|$)", style)
+                    if dur_m:
+                        v = float(dur_m.group(1))
+                        trans_cfg["duration"] = v / 1000.0 if dur_m.group(2) == "ms" else v
+                    tf_m = re.search(
+                        r"(cubic-bezier\([^)]+\)|steps\([^)]+\)|step-start|step-end|ease-in-out|ease-in|ease-out|linear|ease)",
+                        style,
+                        re.IGNORECASE,
+                    )
+                    if tf_m:
+                        tf_str = tf_m.group(0).strip()
+                        trans_cfg["timing_function"] = tf_str
+                        trans_cfg["easing"] = tf_str
+                        trans_cfg["ease"] = tf_str
+
                 appear_animations[appear_id] = {
                     "initial": initial_cfg,
                     "animate": {"opacity": 1, "y": 0},
-                    "transition": {"type": "spring", "stiffness": 200, "damping": 40},
+                    "transition": trans_cfg,
                     "variants": {},
                 }
                 motion_triggers.append({
                     "trigger": "mount",
                     "target": f'[data-framer-appear-id="{appear_id}"]',
+                    "id": appear_id,
                     "initial": initial_cfg,
                     "animate": {"opacity": 1, "y": 0},
-                    "transition": {"type": "spring", "stiffness": 200, "damping": 40},
+                    "transition": trans_cfg,
                     "variants": {},
                 })
 

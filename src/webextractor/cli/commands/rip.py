@@ -218,11 +218,28 @@ async def execute_rip(
         console.print(f"      [green]✓[/green] Reusable components placed in components/")
         console.print("      [green]✓[/green] Design-system tokens placed in styles/tokens.css")
 
+        # Also generate standalone static HTML export for zero-dependency inspection & verification
+        from webextractor.generator.static import StaticProjectGenerator
+        static_dest = dest_dir.parent / f"{dest_dir.name}-html"
+        static_gen = StaticProjectGenerator(site_ir, static_dest)
+        static_gen.generate()
+        console.print(f"      [green]✓[/green] Standalone static HTML export generated in {static_dest.name}/")
+
     # Multi-Signal Verification Audit
+    generated_capture = None
+    html_target = dest_dir if (dest_dir / "index.html").exists() else (dest_dir.parent / f"{dest_dir.name}-html")
+    if (html_target / "index.html").exists():
+        try:
+            from webextractor.verification.screenshots import capture_generated_screenshots
+            generated_capture = await capture_generated_screenshots(html_target, viewports=custom_viewports)
+        except Exception as ex:
+            generated_capture = {"screenshots": {}, "status": "BLOCKED", "error": str(ex)}
+
     fidelity = VisualDiffScorer.evaluate_fidelity(
         output_dir=dest_dir,
         site_ir=site_ir,
         original_capture=capture,
+        generated_capture=generated_capture,
     )
     similarity = fidelity["overall_score"]
     colors_count = len(site_ir.design_system.get("colors", {}))

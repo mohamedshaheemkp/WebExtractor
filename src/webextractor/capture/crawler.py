@@ -182,6 +182,15 @@ class WebsiteCrawler:
                 primary_capture["responsive_rules"] = []
                 primary_capture["interactions"] = []
 
+            # Populate canonical screenshots map for visual validation
+            screens = {}
+            for vp_name, vp_data in primary_capture.get("viewports", {}).items():
+                if "screenshot" in vp_data:
+                    screens[vp_name] = vp_data["screenshot"]
+            if "screenshot" in primary_capture and "desktop" not in screens:
+                screens["desktop"] = primary_capture["screenshot"]
+            primary_capture["screenshots"] = screens
+
             primary_capture["pages"] = captured_pages
             primary_capture["routes"] = [p["route"] for p in captured_pages]
             primary_capture["requests"] = all_requests

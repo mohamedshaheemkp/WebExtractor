@@ -132,10 +132,18 @@ class MultiViewportCapture:
                     if (!element || depth > 20) return null;
                     const rect = element.getBoundingClientRect();
                     const style = window.getComputedStyle(element);
+                    const attrs = {};
+                    if (element.attributes) {
+                        for (const attr of element.attributes) {
+                            attrs[attr.name] = attr.value;
+                        }
+                    }
                     const children = [];
+                    let idx = 0;
                     for (const child of element.children) {
-                        const result = extract(child, depth + 1);
+                        const result = extract(child, depth + 1, `${path}_${idx}`);
                         if (result) children.push(result);
+                        idx++;
                     }
                     return {
                         tag: element.tagName.toLowerCase(),
@@ -153,6 +161,11 @@ class MultiViewportCapture:
                         },
                         src: element.src || element.getAttribute("src") || null,
                         poster: element.getAttribute("poster") || null,
+                        framerName: element.getAttribute("data-framer-name") || null,
+                        framerAppearId: element.getAttribute("data-framer-appear-id") || null,
+                        motionId: element.getAttribute("data-motion-id") || null,
+                        path: path,
+                        attributes: attrs,
                         styles: {
                             display: style.display,
                             position: style.position,
@@ -203,7 +216,7 @@ class MultiViewportCapture:
                     };
                 }
 
-                return extract(document.body);
+                return extract(document.body, 0, "0");
             }
             """
         )
@@ -245,16 +258,14 @@ class MultiViewportCapture:
         if not desktop_dom:
             return rules
 
-        def collect_nodes(node: dict[str, Any] | None, acc: dict[str, dict[str, Any]]) -> None:
+        def collect_nodes(node: dict[str, Any] | None, acc: list[dict[str, Any]]) -> None:
             if not node:
                 return
-            key = f"{node.get('tag')}_{node.get('id')}_{' '.join(node.get('classes', []))}"
-            if key not in acc:
-                acc[key] = node
+            acc.append(node)
             for child in node.get("children", []):
                 collect_nodes(child, acc)
 
-        desktop_nodes: dict[str, dict[str, Any]] = {}
+        desktop_nodes: list[dict[str, Any]] = []
         collect_nodes(desktop_dom, desktop_nodes)
 
         properties_to_check = (
@@ -312,53 +323,97 @@ class MultiViewportCapture:
                 bp_name = vp_key
                 media_query = f"@media (max-width: {w}px)" if w else "@media (max-width: 768px)"
 
-            target_nodes: dict[str, dict[str, Any]] = {}
+            target_nodes: list[dict[str, Any]] = []
             collect_nodes(vp_dom, target_nodes)
 
-            for key, d_node in desktop_nodes.items():
-                if key in target_nodes:
-                    t_node = target_nodes[key]
-                    d_styles = d_node.get("styles", {}) or {}
-                    t_styles = t_node.get("styles", {}) or {}
+            # Build multi-tier index for target nodes
+            by_id: dict[str, dict[str, Any]] = {}
+            by_appear_id: dict[str, dict[str, Any]] = {}
+            by_path: dict[str, dict[str, Any]] = {}
+            by_key: dict[str, dict[str, Any]] = {}
 
-                    diffs: dict[str, Any] = {}
-                    for prop in properties_to_check:
-                        d_val = d_styles.get(prop)
-                        t_val = t_styles.get(prop)
-                        if d_val and t_val and d_val != t_val:
-                            if d_val in ("auto", "none", "0px") and t_val in ("auto", "none", "0px"):
-                                continue
-                            diffs[prop] = {
-                                "desktop": d_val,
-                                bp_name: t_val,
-                                "target": t_val,
-                            }
+            for tn in target_nodes:
+                nid = tn.get("id")
+                if nid and not str(nid).isdigit():
+                    by_id[str(nid)] = tn
+                apid = tn.get("framerAppearId") or (tn.get("attributes", {}).get("data-framer-appear-id") if isinstance(tn.get("attributes"), dict) else None)
+                if apid:
+                    by_appear_id[str(apid)] = tn
+                pth = tn.get("path")
+                if pth:
+                    by_path[str(pth)] = tn
+                raw_k = f"{tn.get('tag')}_{tn.get('id')}_{' '.join(tn.get('classes', []))}"
+                if raw_k not in by_key:
+                    by_key[raw_k] = tn
 
-                    if diffs:
-                        node_id = d_node.get("id")
-                        raw_classes = [c for c in d_node.get("classes", []) if not c.startswith("motion-")]
-                        # Clean classes to valid CSS identifiers
-                        classes = [re.sub(r"[^a-zA-Z0-9_-]", "", c) for c in raw_classes if c]
-                        classes = [c for c in classes if c]
-                        tag = d_node.get("tag", "div")
+            for d_node in desktop_nodes:
+                nid = str(d_node.get("id")) if d_node.get("id") and not str(d_node.get("id")).isdigit() else None
+                apid = d_node.get("framerAppearId") or (d_node.get("attributes", {}).get("data-framer-appear-id") if isinstance(d_node.get("attributes"), dict) else None)
+                pth = d_node.get("path")
+                raw_k = f"{d_node.get('tag')}_{d_node.get('id')}_{' '.join(d_node.get('classes', []))}"
 
-                        if node_id and not node_id.isdigit():
-                            clean_selector = f"#{node_id}"
-                        elif classes:
-                            clean_selector = "." + ".".join(classes)
-                        else:
-                            clean_selector = tag
+                # Match by id -> appear_id -> path -> tag_id_classes key
+                t_node = None
+                if nid and nid in by_id:
+                    t_node = by_id[nid]
+                elif apid and str(apid) in by_appear_id:
+                    t_node = by_appear_id[str(apid)]
+                elif pth and str(pth) in by_path:
+                    t_node = by_path[str(pth)]
+                elif raw_k in by_key:
+                    t_node = by_key[raw_k]
 
-                        rule_id = f"{media_query}_{clean_selector}"
-                        if rule_id not in seen_rule_keys:
-                            seen_rule_keys.add(rule_id)
-                            rules.append({
-                                "selector": clean_selector,
-                                "raw_key": key,
-                                "tag": tag,
-                                "media_query": media_query,
-                                "breakpoint": bp_name,
-                                "diffs": diffs,
-                            })
+                if not t_node:
+                    continue
+
+                d_styles = d_node.get("styles", {}) or {}
+                t_styles = t_node.get("styles", {}) or {}
+
+                diffs: dict[str, Any] = {}
+                for prop in properties_to_check:
+                    d_val = d_styles.get(prop)
+                    t_val = t_styles.get(prop)
+                    if d_val and t_val and d_val != t_val:
+                        if d_val in ("auto", "none", "0px") and t_val in ("auto", "none", "0px"):
+                            continue
+                        diffs[prop] = {
+                            "desktop": d_val,
+                            bp_name: t_val,
+                            "target": t_val,
+                        }
+
+                if diffs:
+                    node_id = d_node.get("id")
+                    appear_id = d_node.get("framerAppearId") or (d_node.get("attributes", {}).get("data-framer-appear-id") if isinstance(d_node.get("attributes"), dict) else None)
+                    framer_name = d_node.get("framerName") or (d_node.get("attributes", {}).get("data-framer-name") if isinstance(d_node.get("attributes"), dict) else None)
+                    raw_classes = [c for c in d_node.get("classes", []) if not c.startswith("motion-")]
+                    classes = [re.sub(r"[^a-zA-Z0-9_-]", "", c) for c in raw_classes if c]
+                    classes = [c for c in classes if c]
+                    tag = d_node.get("tag", "div")
+
+                    if node_id and not str(node_id).isdigit():
+                        clean_selector = f"#{node_id}"
+                    elif appear_id:
+                        clean_selector = f"[data-framer-appear-id='{appear_id}']"
+                    elif classes:
+                        clean_selector = "." + ".".join(classes)
+                    elif framer_name:
+                        clean_selector = f"[data-framer-name='{framer_name}']"
+                    elif tag in ("body", "html", "header", "nav", "main", "footer"):
+                        clean_selector = tag
+                    else:
+                        continue
+
+                    rule_id = f"{media_query}_{clean_selector}"
+                    if rule_id not in seen_rule_keys:
+                        seen_rule_keys.add(rule_id)
+                        rules.append({
+                            "selector": clean_selector,
+                            "raw_key": raw_k,
+                            "tag": tag,
+                            "media_query": media_query,
+                            "breakpoint": bp_name,
+                            "diffs": diffs,
+                        })
 
         return rules

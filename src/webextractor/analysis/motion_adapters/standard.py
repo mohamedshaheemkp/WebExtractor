@@ -6,6 +6,16 @@ from bs4 import BeautifulSoup
 from .base import BaseMotionAdapter
 
 
+TIMING_FUNCTION_RE = re.compile(
+    r"(cubic-bezier\([^)]+\)|steps\([^)]+\)|step-start|step-end|ease-in-out|ease-in|ease-out|linear|ease)",
+    re.IGNORECASE,
+)
+TIME_TOKEN_RE = re.compile(
+    r"(?<![\w.])([0-9]*\.?[0-9]+)(m?s)(?![\w])",
+    re.IGNORECASE,
+)
+
+
 class StandardCssMotionAdapter(BaseMotionAdapter):
     """
     Generic platform-agnostic motion adapter.
@@ -15,6 +25,33 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
     def can_handle(self, html: str, css: str = "") -> bool:
         # Standard adapter runs universally on any website
         return True
+
+    @staticmethod
+    def _parse_transition_clause(clause: str) -> tuple[float | None, str | None, float | None]:
+        """
+        Parses a single transition clause according to CSS specs:
+        transition: [property] [duration] [timing-function] [delay]
+        Returns (duration, timing_function, delay).
+        Correctly handles: .3s, 0.3s, 1.2s, 0s without confusing duration with delay.
+        """
+        tf_match = TIMING_FUNCTION_RE.search(clause)
+        tf_val = tf_match.group(0).strip() if tf_match else None
+
+        # Strip timing function so unitless numbers inside cubic-bezier/steps aren't matched as times
+        clause_no_tf = TIMING_FUNCTION_RE.sub("", clause)
+        times = list(TIME_TOKEN_RE.finditer(clause_no_tf))
+
+        dur_val: float | None = None
+        delay_val: float | None = None
+
+        if len(times) >= 1:
+            v = float(times[0].group(1))
+            dur_val = v / 1000.0 if times[0].group(2).lower() == "ms" else v
+        if len(times) >= 2:
+            v = float(times[1].group(1))
+            delay_val = v / 1000.0 if times[1].group(2).lower() == "ms" else v
+
+        return dur_val, tf_val, delay_val
 
     def extract_motion(self, html: str, css: str = "") -> dict[str, Any]:
         keyframes: list[dict[str, Any]] = []
@@ -38,43 +75,36 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
 
             # Derive realistic default reveal duration and timing function from
             # the site's own transition declarations.
-            trans_matches = re.findall(
-                r"transition(?:-[a-z-]+)?\s*:\s*([^;]+);?",
-                css,
-                re.IGNORECASE,
-            )
             extracted_durations: list[float] = []
             extracted_easings: list[str] = []
 
-            for tm in trans_matches:
-                tm_str = tm.strip()
-                # 1. Parse duration in s or ms (supporting leading decimals like .3s as well as 1.2s)
-                d_m = re.search(r"(?:^|[^\d.])(\d*\.?\d+)(m?s)(?:[^\w]|$)", tm_str)
-                if d_m:
-                    try:
-                        val = float(d_m.group(1))
-                        if d_m.group(2) == "ms":
-                            val /= 1000.0
-                        if val > 0:
-                            extracted_durations.append(val)
-                    except ValueError:
-                        pass
+            # 1a. Explicit transition-duration properties
+            for dur_m in re.finditer(r"transition-duration\s*:\s*([^;]+)", css, re.IGNORECASE):
+                for tm in TIME_TOKEN_RE.finditer(dur_m.group(1)):
+                    v = float(tm.group(1))
+                    val = v / 1000.0 if tm.group(2).lower() == "ms" else v
+                    if val > 0:
+                        extracted_durations.append(val)
 
-                # 2. Parse timing function (cubic-bezier, steps, or standard keywords)
-                tf_m = re.search(
-                    r"(cubic-bezier\([^)]+\)|steps\([^)]+\)|linear|ease-in-out|ease-in|ease-out|ease)",
-                    tm_str,
-                    re.IGNORECASE,
-                )
-                if tf_m:
-                    tf_val = tf_m.group(1).strip()
-                    extracted_easings.append(tf_val)
+            # 1b. Explicit transition-timing-function properties
+            for tf_m in re.finditer(r"transition-timing-function\s*:\s*([^;]+)", css, re.IGNORECASE):
+                for match in TIMING_FUNCTION_RE.finditer(tf_m.group(1)):
+                    extracted_easings.append(match.group(0).strip())
+
+            # 1c. Shorthand transition declarations
+            for sh_m in re.finditer(r"(?<![a-zA-Z0-9_-])transition\s*:\s*([^;]+);?", css, re.IGNORECASE):
+                parts = re.split(r",\s*(?![^(]*\))", sh_m.group(1).strip())
+                for part in parts:
+                    d_val, t_val, _ = self._parse_transition_clause(part)
+                    if d_val is not None and d_val > 0:
+                        extracted_durations.append(d_val)
+                    if t_val:
+                        extracted_easings.append(t_val)
 
             if extracted_durations:
                 default_duration = sum(extracted_durations) / len(extracted_durations)
 
-            # Prioritize specific easing curves (cubic-bezier/steps > named non-ease curves > ease)
-            default_easing: str | None = None
+            # Prioritize specific easing curves (cubic-bezier/steps > named non-ease curves > ease/linear)
             for e in extracted_easings:
                 if "cubic-bezier" in e.lower() or "steps" in e.lower():
                     default_easing = e
@@ -94,34 +124,63 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
                 sel = rm.group(1).strip()
                 body = rm.group(2).strip()
                 if "transition" in body:
-                    tm = re.search(r"transition(?:-[a-z-]+)?\s*:\s*([^;]+);?", body, re.IGNORECASE)
-                    if tm:
-                        t_str = tm.group(1).strip()
-                        dur_val = None
-                        d_m = re.search(r"(?:^|[^\d.])(\d*\.?\d+)(m?s)(?:[^\w]|$)", t_str)
-                        if d_m:
-                            try:
-                                v = float(d_m.group(1))
-                                dur_val = v / 1000.0 if d_m.group(2) == "ms" else v
-                            except ValueError:
-                                pass
-                        tf_m = re.search(
-                            r"(cubic-bezier\([^)]+\)|steps\([^)]+\)|linear|ease-in-out|ease-in|ease-out|ease)",
-                            t_str,
-                            re.IGNORECASE,
-                        )
-                        tf_val = tf_m.group(1).strip() if tf_m else None
-                        if dur_val or tf_val:
-                            clean_sel = sel.split(",")[0].strip()
-                            resolved_tf = tf_val or default_easing
-                            element_transitions[clean_sel] = {
-                                "duration": dur_val or default_duration,
-                                "type": "tween",
-                                "timing_function": resolved_tf,
-                                "easing": resolved_tf,
-                                "ease": resolved_tf,
-                                "raw": t_str,
-                            }
+                    dur_val: float | None = None
+                    tf_val: str | None = None
+                    delay_val: float | None = None
+                    raw_str: str = ""
+
+                    # Check longhands first
+                    dur_match = re.search(r"transition-duration\s*:\s*([^;]+)", body, re.IGNORECASE)
+                    if dur_match:
+                        raw_str = dur_match.group(0)
+                        times = list(TIME_TOKEN_RE.finditer(dur_match.group(1)))
+                        if times:
+                            v = float(times[0].group(1))
+                            dur_val = v / 1000.0 if times[0].group(2).lower() == "ms" else v
+
+                    tf_match = re.search(r"transition-timing-function\s*:\s*([^;]+)", body, re.IGNORECASE)
+                    if tf_match:
+                        raw_str = raw_str or tf_match.group(0)
+                        m = TIMING_FUNCTION_RE.search(tf_match.group(1))
+                        if m:
+                            tf_val = m.group(0).strip()
+
+                    delay_match = re.search(r"transition-delay\s*:\s*([^;]+)", body, re.IGNORECASE)
+                    if delay_match:
+                        times = list(TIME_TOKEN_RE.finditer(delay_match.group(1)))
+                        if times:
+                            v = float(times[0].group(1))
+                            delay_val = v / 1000.0 if times[0].group(2).lower() == "ms" else v
+
+                    # Check shorthand
+                    sh_match = re.search(r"(?<![a-zA-Z0-9_-])transition\s*:\s*([^;]+);?", body, re.IGNORECASE)
+                    if sh_match:
+                        raw_str = raw_str or sh_match.group(0)
+                        parts = re.split(r",\s*(?![^(]*\))", sh_match.group(1).strip())
+                        for part in parts:
+                            p_dur, p_tf, p_delay = self._parse_transition_clause(part)
+                            if dur_val is None and p_dur is not None:
+                                dur_val = p_dur
+                            if tf_val is None and p_tf is not None:
+                                tf_val = p_tf
+                            if delay_val is None and p_delay is not None:
+                                delay_val = p_delay
+
+                    if dur_val is not None or tf_val is not None:
+                        clean_sel = sel.split(",")[0].strip()
+                        resolved_dur = dur_val if dur_val is not None else default_duration
+                        resolved_tf = tf_val or default_easing
+                        entry = {
+                            "duration": round(resolved_dur, 2),
+                            "type": "tween",
+                            "timing_function": resolved_tf,
+                            "easing": resolved_tf,
+                            "ease": resolved_tf,
+                            "raw": raw_str,
+                        }
+                        if delay_val is not None:
+                            entry["delay"] = round(delay_val, 2)
+                        element_transitions[clean_sel] = entry
         else:
             element_transitions = {}
 
@@ -143,6 +202,7 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
                         "duration": float(duration) / 1000.0 if duration.isdigit() else 0.8,
                         "timing_function": default_easing,
                         "easing": default_easing,
+                        "ease": default_easing,
                     },
                 })
 
@@ -165,4 +225,6 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
             "default_timing_function": default_easing,
             "default_easing": default_easing,
             "timing_function": default_easing,
+            "easing": default_easing,
+            "ease": default_easing,
         }

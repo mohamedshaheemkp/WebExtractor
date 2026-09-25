@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
@@ -19,9 +19,62 @@ class AssetBinding:
     component: str  # Target component name, e.g. "Hero", "ProjectCard"
     breakpoint: str | None = None  # "desktop" | "mobile" | None (all)
     resolved: bool = True
+    variants: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+class ManifestLookup(dict):
+    """
+    Transparent dict-compatible manifest lookup that accurately distinguishes
+    canonical assets, variants, duplicates, and aliases without overwriting.
+    """
+    def __init__(self, asset_manifest: list[dict[str, Any]]):
+        super().__init__()
+        self.exact_map: dict[str, dict[str, Any]] = {}
+        self.variants_by_clean_url: dict[str, list[dict[str, Any]]] = {}
+        self.canonical_map: dict[str, dict[str, Any]] = {}
+
+        for item in asset_manifest:
+            src = item.get("source", "").strip()
+            if not src:
+                continue
+            self.exact_map[src] = item
+            clean_url = src.split("?")[0]
+            self.variants_by_clean_url.setdefault(clean_url, []).append(item)
+
+        # Establish canonical representation for each clean URL
+        for clean_url, var_list in self.variants_by_clean_url.items():
+            if clean_url in self.exact_map:
+                self.canonical_map[clean_url] = self.exact_map[clean_url]
+            else:
+                def _get_res(it: dict[str, Any]) -> int:
+                    s = it.get("source", "")
+                    m = re.search(r"(?:scale-down-to|width|w|size)=(\d+)", s, re.IGNORECASE)
+                    if m:
+                        return int(m.group(1))
+                    return it.get("size_bytes", 0)
+
+                best = max(var_list, key=_get_res)
+                self.canonical_map[clean_url] = best
+
+        # Populate underlying dict for 100% backwards compatibility
+        for src, item in self.exact_map.items():
+            self[src] = item
+        for clean_url, item in self.canonical_map.items():
+            if clean_url not in self:
+                self[clean_url] = item
+
+    def get_match(self, url: str) -> dict[str, Any] | None:
+        if url in self.exact_map:
+            return self.exact_map[url]
+        clean_url = url.split("?")[0]
+        return self.canonical_map.get(clean_url) or self.get(clean_url)
+
+    def get_variants(self, url: str) -> list[dict[str, Any]]:
+        clean_url = url.split("?")[0]
+        return self.variants_by_clean_url.get(clean_url, [])
 
 
 class AssetBindingEngine:
@@ -43,15 +96,8 @@ class AssetBindingEngine:
         """
         bindings: list[AssetBinding] = []
 
-        # Map source URL -> local asset entry
-        manifest_map: dict[str, dict[str, Any]] = {}
-        for item in asset_manifest:
-            src = item.get("source", "").strip()
-            if src:
-                manifest_map[src] = item
-                # Also index by path without query params for flexible matching
-                clean_url = src.split("?")[0]
-                manifest_map[clean_url] = item
+        # Build non-destructive ManifestLookup preserving canonicals and variants
+        manifest_map = ManifestLookup(asset_manifest)
 
         # Collect candidate asset nodes from viewports and main DOM
         desktop_dom = viewports.get("desktop", {}).get("dom") or rendered_dom
@@ -138,11 +184,16 @@ class AssetBindingEngine:
         source_url: str,
         role: str,
         asset_type: str,
-        manifest_map: dict[str, dict[str, Any]],
+        manifest_map: ManifestLookup | dict[str, dict[str, Any]],
         breakpoint: str | None,
     ) -> None:
-        clean_url = source_url.split("?")[0]
-        manifest_item = manifest_map.get(source_url) or manifest_map.get(clean_url)
+        if isinstance(manifest_map, ManifestLookup):
+            manifest_item = manifest_map.get_match(source_url)
+            raw_variants = manifest_map.get_variants(source_url)
+        else:
+            clean_url = source_url.split("?")[0]
+            manifest_item = manifest_map.get(source_url) or manifest_map.get(clean_url)
+            raw_variants = [manifest_item] if manifest_item else []
 
         local_path = ""
         resolved = False
@@ -150,6 +201,20 @@ class AssetBindingEngine:
             if manifest_item.get("downloaded") is not False:
                 local_path = manifest_item["local"]
                 resolved = True
+
+        variants = []
+        for v in raw_variants:
+            if v and v.get("local"):
+                v_src = v.get("source", "")
+                m = re.search(r"(?:scale-down-to|width|w|size)=(\d+)", v_src, re.IGNORECASE)
+                width = int(m.group(1)) if m else None
+                variants.append({
+                    "source_url": v_src,
+                    "local_path": v["local"],
+                    "width": width,
+                    "size_bytes": v.get("size_bytes", 0),
+                })
+        variants.sort(key=lambda x: x["width"] or 0)
 
         asset_id = f"{component.lower()}-{role}-{len(bindings)}"
 
@@ -163,6 +228,7 @@ class AssetBindingEngine:
                 component=component,
                 breakpoint=breakpoint,
                 resolved=resolved,
+                variants=variants,
             )
         )
 
@@ -218,6 +284,14 @@ class AssetBindingEngine:
         image_assets = [m for m in manifest if m.get("category") == "images" and m.get("downloaded") is not False and m.get("local")]
         video_assets = [m for m in manifest if m.get("category") == "videos" and m.get("downloaded") is not False and m.get("local")]
 
+        # Group image assets by canonical clean URL so variants of the same image are not handed out to multiple components
+        distinct_images = {}
+        for m in image_assets:
+            c_url = m.get("source", "").split("?")[0]
+            if c_url not in distinct_images:
+                distinct_images[c_url] = m
+        canonical_images = list(distinct_images.values())
+
         # Hero fallback
         if "Hero" not in bound_components:
             if video_assets:
@@ -231,8 +305,8 @@ class AssetBindingEngine:
                     component="Hero",
                     resolved=True,
                 ))
-            elif image_assets:
-                img = image_assets[0]
+            elif canonical_images:
+                img = canonical_images[0]
                 bindings.append(AssetBinding(
                     asset_id="hero-bg-0",
                     source_url=img.get("source", ""),
@@ -244,8 +318,8 @@ class AssetBindingEngine:
                 ))
 
         # ProjectCard fallback
-        if "ProjectCard" not in bound_components and len(image_assets) > 1:
-            for i, img in enumerate(image_assets[1:4]):
+        if "ProjectCard" not in bound_components and len(canonical_images) > 1:
+            for i, img in enumerate(canonical_images[1:4]):
                 bindings.append(AssetBinding(
                     asset_id=f"project-img-{i}",
                     source_url=img.get("source", ""),

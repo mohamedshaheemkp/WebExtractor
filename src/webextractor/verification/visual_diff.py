@@ -247,12 +247,24 @@ class VisualDiffScorer:
         # -------------------------------------------------------------
         visual_comps = []
         screenshot_sim = None
+        gen_blocked = False
+        gen_blocked_reason = ""
 
-        if original_capture and generated_capture:
+        if generated_capture and generated_capture.get("status") == "BLOCKED":
+            gen_blocked = True
+            gen_blocked_reason = generated_capture.get("error", "Visual comparison execution was blocked")
+
+        if original_capture and generated_capture and not gen_blocked:
             orig_screens = original_capture.get("screenshots", {})
             gen_screens = generated_capture.get("screenshots", {})
             for vp, orig_file in orig_screens.items():
                 gen_file = gen_screens.get(vp)
+                if not gen_file:
+                    vp_clean = vp.replace("vp_", "")
+                    for gk, gv in gen_screens.items():
+                        if gk.replace("vp_", "") == vp_clean:
+                            gen_file = gv
+                            break
                 if gen_file and Path(orig_file).exists() and Path(gen_file).exists():
                     comp_res = ScreenshotComparator.compare_screenshots(orig_file, gen_file)
                     comp_res["viewport"] = vp
@@ -269,6 +281,13 @@ class VisualDiffScorer:
                 "comparisons_count": len(visual_comps),
                 "details": f"{len(visual_comps)} viewports visually compared (avg similarity: {round(screenshot_sim, 1)}%)",
             }
+        elif gen_blocked:
+            categories["visual"] = {
+                "status": "BLOCKED",
+                "score": None,
+                "comparisons_count": 0,
+                "details": f"Visual comparison blocked: {gen_blocked_reason}",
+            }
         else:
             categories["visual"] = {
                 "status": "NOT_RUN",
@@ -278,7 +297,7 @@ class VisualDiffScorer:
             }
 
         # -------------------------------------------------------------
-        # OVERALL FIDELITY SCORE
+        # OVERALL FIDELITY SCORE & HONEST STATUS
         # -------------------------------------------------------------
         overall = cls.calculate_score(
             components_count=len(matched_comps),
@@ -288,12 +307,20 @@ class VisualDiffScorer:
             screenshot_sim=screenshot_sim,
         )
 
-        if categories["visual"]["status"] == "FAIL":
+        v_status = categories["visual"]["status"]
+        if v_status == "FAIL":
             overall_status = "FAIL"
-        elif categories["visual"]["status"] == "WARN":
+        elif v_status == "BLOCKED":
+            overall_status = "BLOCKED"
+        elif v_status == "NOT_RUN":
+            # Stage 7 Requirement: Never allow overall status to become PASS without actual visual comparison evidence!
+            overall_status = "NOT_RUN"
+        elif v_status == "WARN":
             overall_status = "WARN"
-        else:
+        elif v_status == "PASS":
             overall_status = "PASS" if overall >= 85.0 else ("WARN" if overall >= 65.0 else "FAIL")
+        else:
+            overall_status = "NOT_RUN"
 
         return {
             "status": overall_status,

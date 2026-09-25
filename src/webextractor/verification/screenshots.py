@@ -281,3 +281,64 @@ class ScreenshotComparator:
                 "original": str(orig),
                 "generated": str(gen),
             }
+
+
+async def capture_generated_screenshots(
+    output_dir: Path | str,
+    viewports: dict[str, dict[str, int]] | None = None,
+) -> dict[str, Any]:
+    """
+    Renders the generated HTML output in headless Chromium across configured viewports
+    and captures screenshots for empirical visual diff comparison.
+    """
+    out_path = Path(output_dir)
+    html_file = out_path / "index.html"
+    if not html_file.exists():
+        candidates = list(out_path.glob("**/index.html"))
+        if candidates:
+            html_file = candidates[0]
+        else:
+            return {
+                "screenshots": {},
+                "status": "BLOCKED",
+                "error": f"No index.html entry point found in {out_path}",
+            }
+
+    from webextractor.constants import DEFAULT_VIEWPORTS
+    vps = viewports or dict(DEFAULT_VIEWPORTS)
+
+    screenshots: dict[str, str] = {}
+    ss_dir = out_path / "verification" / "screenshots"
+    ss_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            for vp_name, vp_cfg in vps.items():
+                w = vp_cfg.get("width", 1440)
+                h = vp_cfg.get("height", 900)
+                page = await browser.new_page(viewport={"width": w, "height": h})
+                try:
+                    file_url = f"file:///{html_file.resolve().as_posix()}"
+                    await page.goto(file_url, wait_until="load", timeout=30_000)
+                    await page.wait_for_timeout(1000)
+                    shot_path = ss_dir / f"{vp_name}_gen.png"
+                    await page.screenshot(path=str(shot_path), full_page=True)
+                    screenshots[vp_name] = str(shot_path)
+                finally:
+                    await page.close()
+            await browser.close()
+
+        return {
+            "screenshots": screenshots,
+            "status": "OK",
+            "html_entry": str(html_file),
+        }
+    except Exception as ex:
+        return {
+            "screenshots": screenshots,
+            "status": "BLOCKED",
+            "error": str(ex),
+        }
+
