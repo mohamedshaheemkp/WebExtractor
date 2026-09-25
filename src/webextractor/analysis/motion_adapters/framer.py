@@ -59,6 +59,17 @@ class FramerMotionAdapter(BaseMotionAdapter):
                                 animate_target = default_cfg.get("animate", {})
                                 transition = animate_target.get("transition", {})
 
+                                if isinstance(transition, dict):
+                                    ease_val = transition.get("ease")
+                                    if isinstance(ease_val, list) and len(ease_val) == 4:
+                                        tf = f"cubic-bezier({ease_val[0]}, {ease_val[1]}, {ease_val[2]}, {ease_val[3]})"
+                                        transition["timing_function"] = tf
+                                        transition["easing"] = tf
+                                        transition["ease"] = tf
+                                    elif isinstance(ease_val, str) and ease_val:
+                                        transition["timing_function"] = ease_val
+                                        transition["easing"] = ease_val
+
                                 clean_animate = {
                                     k: v for k, v in animate_target.items() if k != "transition"
                                 }

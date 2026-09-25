@@ -47,6 +47,12 @@ class SiteAnalyzer:
 
         dom = self.dom.analyze(html)
         routes = self.routes.analyze(html, url)
+        # Merge in every route the crawler actually visited (BFS across depth,
+        # not just links found on the homepage) so pages reachable only from
+        # sub-pages still get generated.
+        crawled_routes = capture.get("routes", [])
+        if crawled_routes:
+            routes = sorted(set(routes) | {r for r in crawled_routes if r})
 
         rendered_dom = capture.get("dom")
         if (not rendered_dom or not rendered_dom.get("children")) and html:
@@ -148,6 +154,60 @@ class SiteAnalyzer:
             html_content=html,
             css_content=capture.get("css", ""),
         )
+
+        # Merge generic scroll-reveal detections (from pre/post-scroll style
+        # diffing in the browser capture) into the appear-animation map.
+        # This covers reveal animations regardless of which library the
+        # source site used (Framer's own runtime is still handled above via
+        # data-framer-appear-id; this fills the gap for everything else).
+        reveal_candidates = capture.get("reveal_candidates", [])
+        if reveal_candidates:
+            appear = animations.setdefault("appear_animations", {})
+            triggers = animations.setdefault("motion_triggers", [])
+            default_duration = animations.get("default_transition_duration", 0.6)
+            site_easing = animations.get("default_easing")
+            for rc in reveal_candidates:
+                rid = rc.get("id")
+                if not rid or rid in appear:
+                    continue
+                initial = rc.get("initial", {}) or {}
+                rc_dur = rc.get("duration")
+                rc_easing = rc.get("easing") or site_easing
+
+                dur_val = float(rc_dur.rstrip("s")) if (isinstance(rc_dur, str) and rc_dur.endswith("s")) else (float(rc_dur) if rc_dur else default_duration)
+
+                trans_cfg: dict[str, Any] = {
+                    "duration": round(dur_val, 2),
+                    "type": "tween",
+                }
+                if rc_easing:
+                    trans_cfg["timing_function"] = rc_easing
+                    trans_cfg["easing"] = rc_easing
+                    trans_cfg["ease"] = rc_easing
+
+                cfg = {
+                    "initial": {
+                        "opacity": round(float(initial.get("opacity", 1)), 3),
+                        "y": round(float(initial.get("y", 0)), 1),
+                        "x": round(float(initial.get("x", 0)), 1),
+                    },
+                    "animate": {"opacity": 1, "y": 0, "x": 0},
+                    "transition": trans_cfg,
+                    "trigger": "in_view",
+                }
+                appear[rid] = cfg
+                triggers.append({
+                    "trigger": "in_view",
+                    "target": f'[data-motion-id="{rid}"]',
+                    **cfg,
+                })
+
+        # Extract DOM-level computed transitions (Path 2: DOM computed-style path)
+        if capture.get("dom"):
+            self._extract_dom_transitions(capture.get("dom"), animations)
+        for p in capture.get("pages", []):
+            if p.get("dom"):
+                self._extract_dom_transitions(p.get("dom"), animations)
 
         # Extract behavioral interactions from probe evidence and DOM/CSS/route clues
         probe_interactions = capture.get("interactions", [])
@@ -299,7 +359,15 @@ class SiteAnalyzer:
         setattr(site_model, "asset_bindings", [b.to_dict() for b in asset_bindings])
         setattr(site_model, "typography", typography)
         setattr(site_model, "layout", layout)
-        setattr(site_model, "responsive_rules", capture.get("responsive_rules", []))
+        resp_rules = capture.get("responsive_rules", [])
+        if not resp_rules and capture.get("viewports"):
+            try:
+                from webextractor.capture.multi_viewport import MultiViewportCapture
+                mvc = MultiViewportCapture(output_dir="")
+                resp_rules = mvc._extract_responsive_rules(capture.get("viewports", {}))
+            except Exception:
+                pass
+        setattr(site_model, "responsive_rules", resp_rules)
         setattr(site_model, "viewports", capture.get("viewports", {}))
         setattr(site_model, "animations", animations)
         setattr(site_model, "interactions", interactions)
@@ -307,6 +375,112 @@ class SiteAnalyzer:
         return site_model
 
 
+
+    def _extract_dom_transitions(
+        self,
+        dom_node: dict[str, Any] | None,
+        animations: dict[str, Any],
+    ) -> None:
+        """
+        Traverses captured DOM tree to propagate explicit transition properties
+        (especially cubic-bezier or steps curves) into the animation IR.
+        """
+        if not dom_node or not isinstance(dom_node, dict):
+            return
+
+        styles = dom_node.get("styles", {}) or {}
+        tf = styles.get("transitionTimingFunction")
+        dur_str = styles.get("transitionDuration")
+        trans_str = styles.get("transition")
+
+        # Ignore unstyled elements or zero-duration transitions unless explicit curve exists
+        has_explicit_tf = bool(tf and tf.lower() not in ("ease", "none", "initial", "inherit"))
+        has_explicit_dur = bool(dur_str and dur_str not in ("0s", "0ms", ""))
+
+        if has_explicit_tf or (has_explicit_dur and trans_str):
+            duration = 0.3
+            if dur_str:
+                d_m = re.search(r"(?:^|[^\d.])(\d*\.?\d+)(m?s)", dur_str)
+                if d_m:
+                    val = float(d_m.group(1))
+                    if d_m.group(2) == "ms":
+                        val /= 1000.0
+                    if val > 0:
+                        duration = val
+
+            timing_function = tf if has_explicit_tf else None
+            if not timing_function and trans_str:
+                tf_m = re.search(
+                    r"(cubic-bezier\([^)]+\)|steps\([^)]+\)|linear|ease-in-out|ease-in|ease-out|ease)",
+                    trans_str,
+                    re.IGNORECASE,
+                )
+                if tf_m:
+                    timing_function = tf_m.group(1).strip()
+
+            if timing_function and timing_function.lower() != "ease":
+                node_id = dom_node.get("id")
+                raw_classes = [c for c in dom_node.get("classes", []) if not c.startswith("motion-")]
+                classes = [re.sub(r"[^a-zA-Z0-9_-]", "", c) for c in raw_classes if c]
+                classes = [c for c in classes if c]
+                tag = dom_node.get("tag", "div")
+                attrs = dom_node.get("attributes", {}) or {}
+                framer_appear_id = attrs.get("data-framer-appear-id")
+                motion_id = attrs.get("data-motion-id")
+
+                if node_id and not node_id.isdigit():
+                    target_sel = f"#{node_id}"
+                    target_id = node_id
+                elif classes:
+                    target_sel = "." + ".".join(classes[:2])
+                    target_id = classes[0]
+                else:
+                    target_sel = tag
+                    target_id = tag
+
+                elem_trans = animations.setdefault("element_transitions", {})
+                elem_trans[target_sel] = {
+                    "duration": round(duration, 2),
+                    "type": "tween",
+                    "timing_function": timing_function,
+                    "easing": timing_function,
+                    "ease": timing_function,
+                }
+
+                # Update site default timing function if unset or default
+                if not animations.get("timing_function") or animations.get("timing_function") in ("ease", "linear"):
+                    animations["timing_function"] = timing_function
+                    animations["default_easing"] = timing_function
+                    animations["default_timing_function"] = timing_function
+
+                # Propagate explicit timing function into appear_animations
+                appear = animations.setdefault("appear_animations", {})
+                candidate_ids = [framer_appear_id, motion_id, target_id, node_id]
+                for cid in candidate_ids:
+                    if cid and cid in appear:
+                        appear[cid].setdefault("transition", {})
+                        appear[cid]["transition"]["timing_function"] = timing_function
+                        appear[cid]["transition"]["easing"] = timing_function
+                        appear[cid]["transition"]["ease"] = timing_function
+                        appear[cid]["transition"]["duration"] = round(duration, 2)
+
+                # Also propagate into motion_triggers
+                triggers = animations.setdefault("motion_triggers", [])
+                for trg in triggers:
+                    trg_target = trg.get("target", "")
+                    if (
+                        (framer_appear_id and framer_appear_id in trg_target)
+                        or (motion_id and motion_id in trg_target)
+                        or (target_sel in trg_target)
+                    ):
+                        trg.setdefault("transition", {})
+                        trg["transition"]["timing_function"] = timing_function
+                        trg["transition"]["easing"] = timing_function
+                        trg["transition"]["ease"] = timing_function
+                        trg["transition"]["duration"] = round(duration, 2)
+
+        for child in dom_node.get("children", []):
+            self._extract_dom_transitions(child, animations)
 
     def _infer_page_components(
         self,

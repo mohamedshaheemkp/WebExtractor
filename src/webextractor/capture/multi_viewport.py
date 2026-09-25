@@ -1,27 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
 from playwright.async_api import BrowserContext, Page
 
 
-VIEWPORTS = {
-    "desktop": {"width": 1440, "height": 900},
-    "tablet": {"width": 768, "height": 1024},
-    "mobile": {"width": 375, "height": 812},
-}
+from webextractor.config import config
+from webextractor.constants import DEFAULT_VIEWPORTS
+
+VIEWPORTS = DEFAULT_VIEWPORTS
 
 
 class MultiViewportCapture:
     """
     Captures full-page DOM, computed styles, and screenshots across
-    multiple responsive breakpoints (Desktop, Tablet, Mobile).
+    configurable responsive breakpoints (Mobile, Tablet, Laptop, Desktop, Widescreen).
     """
 
-    def __init__(self, output_dir: str | Path):
+    def __init__(
+        self,
+        output_dir: str | Path,
+        viewports: dict[str, dict[str, int]] | None = None,
+    ):
         self.output_dir = Path(output_dir)
+        self.viewports = viewports or dict(config.viewports)
 
     async def capture_all(
         self,
@@ -30,7 +35,7 @@ class MultiViewportCapture:
     ) -> dict[str, Any]:
         results: dict[str, Any] = {}
 
-        for device_name, viewport in VIEWPORTS.items():
+        for device_name, viewport in self.viewports.items():
             page = await context.new_page()
             await page.set_viewport_size(viewport)
 
@@ -48,10 +53,16 @@ class MultiViewportCapture:
 
                 dom_snapshot = await self._extract_dom(page)
 
+                # Mobile interactive state discovery: probe mobile menu if viewport <= 768px
+                menu_state = None
+                if viewport.get("width", 1440) <= 768:
+                    menu_state = await self._probe_mobile_menu(page, device_name)
+
                 results[device_name] = {
                     "viewport": viewport,
                     "screenshot": str(screenshot_path),
                     "dom": dom_snapshot,
+                    "menu_state": menu_state,
                 }
             finally:
                 await page.close()
@@ -63,6 +74,34 @@ class MultiViewportCapture:
             "viewports": results,
             "responsive_rules": responsive_rules,
         }
+
+    async def _probe_mobile_menu(self, page: Page, device_name: str) -> dict[str, Any] | None:
+        """Discovers and captures dynamically mounted mobile navigation states."""
+        try:
+            triggers = await page.query_selector_all(
+                "button[aria-label*='menu' i], [aria-expanded], [class*='menu' i], [data-framer-name*='menu' i], [data-framer-name*='nav' i], nav button, header button"
+            )
+            for trig in triggers:
+                if await trig.is_visible():
+                    open_ss = self.output_dir / "screenshots" / f"{device_name}_menu_open.png"
+                    await trig.click(timeout=3000)
+                    await page.wait_for_timeout(600)
+                    await page.screenshot(path=str(open_ss), full_page=True)
+                    open_dom = await self._extract_dom(page)
+                    # Attempt to close back
+                    try:
+                        await trig.click(timeout=1500)
+                        await page.wait_for_timeout(200)
+                    except Exception:
+                        pass
+                    return {
+                        "type": "mobile_menu",
+                        "screenshot": str(open_ss),
+                        "open_dom": open_dom,
+                    }
+        except Exception:
+            pass
+        return None
 
     async def _scroll(self, page: Page) -> None:
         await page.evaluate(
@@ -171,16 +210,42 @@ class MultiViewportCapture:
 
     def _extract_responsive_rules(self, viewports_data: dict[str, Any]) -> list[dict[str, Any]]:
         """
-        Detects style changes between desktop (1440) and mobile (375).
+        Detects layout and style changes across all captured viewports relative to desktop (1440).
+        Emits clean CSS selectors and standard breakpoint queries.
         """
-        rules = []
-        desktop_dom = viewports_data.get("desktop", {}).get("dom")
-        mobile_dom = viewports_data.get("mobile", {}).get("dom")
-
-        if not desktop_dom or not mobile_dom:
+        rules: list[dict[str, Any]] = []
+        if not viewports_data:
             return rules
 
-        def collect_nodes(node, acc):
+        # Flexible desktop DOM resolution (supports 'desktop', 'vp_1440', or closest width to 1440)
+        desktop_dom = None
+        desktop_key = None
+
+        for k in ("desktop", "vp_1440", "1440"):
+            if k in viewports_data and isinstance(viewports_data[k], dict) and viewports_data[k].get("dom"):
+                desktop_dom = viewports_data[k]["dom"]
+                desktop_key = k
+                break
+
+        if not desktop_dom:
+            candidates: list[tuple[str, dict[str, Any], int]] = []
+            for k, v in viewports_data.items():
+                if isinstance(v, dict) and v.get("dom"):
+                    vp = v.get("viewport", {})
+                    w = vp.get("width", 0)
+                    if not w:
+                        m = re.search(r"\d+", k)
+                        if m:
+                            w = int(m.group(0))
+                    candidates.append((k, v["dom"], w))
+            if candidates:
+                candidates.sort(key=lambda item: abs(item[2] - 1440) if item[2] else 9999)
+                desktop_key, desktop_dom, _ = candidates[0]
+
+        if not desktop_dom:
+            return rules
+
+        def collect_nodes(node: dict[str, Any] | None, acc: dict[str, dict[str, Any]]) -> None:
             if not node:
                 return
             key = f"{node.get('tag')}_{node.get('id')}_{' '.join(node.get('classes', []))}"
@@ -189,31 +254,111 @@ class MultiViewportCapture:
             for child in node.get("children", []):
                 collect_nodes(child, acc)
 
-        desktop_nodes = {}
-        mobile_nodes = {}
+        desktop_nodes: dict[str, dict[str, Any]] = {}
         collect_nodes(desktop_dom, desktop_nodes)
-        collect_nodes(mobile_dom, mobile_nodes)
 
-        for key, d_node in desktop_nodes.items():
-            if key in mobile_nodes:
-                m_node = mobile_nodes[key]
-                d_styles = d_node.get("styles", {})
-                m_styles = m_node.get("styles", {})
+        properties_to_check = (
+            "width", "maxWidth", "minWidth", "height", "maxHeight",
+            "padding", "margin", "gap", "rowGap", "columnGap",
+            "flexDirection", "flexWrap", "display", "alignItems", "justifyContent",
+            "gridTemplateColumns", "fontSize", "lineHeight", "letterSpacing",
+            "position", "overflow", "visibility"
+        )
 
-                diffs = {}
-                for prop in ("fontSize", "flexDirection", "display", "padding"):
-                    if d_styles.get(prop) and m_styles.get(prop) and d_styles[prop] != m_styles[prop]:
-                        diffs[prop] = {
-                            "desktop": d_styles[prop],
-                            "mobile": m_styles[prop],
-                        }
+        seen_rule_keys: set[str] = set()
 
-                if diffs:
-                    rules.append({
-                        "selector": key,
-                        "tag": d_node.get("tag"),
-                        "text": d_node.get("text", "")[:40],
-                        "diffs": diffs,
-                    })
+        for vp_key, vp_val in viewports_data.items():
+            if vp_key == desktop_key or not isinstance(vp_val, dict):
+                continue
 
-        return rules[:30]  # Return top 30 detected responsive rules
+            vp_dom = vp_val.get("dom")
+            if not vp_dom:
+                continue
+
+            vp_info = vp_val.get("viewport", {})
+            w = vp_info.get("width", 0)
+            if not w:
+                m = re.search(r"\d+", vp_key)
+                if m:
+                    w = int(m.group(0))
+
+            # Derive standard media query & breakpoint identifier with proper isolation
+            if w and w <= 480:
+                media_query = "@media (max-width: 768px)"
+                bp_name = "mobile"
+            elif w and w <= 768:
+                media_query = "@media (min-width: 481px) and (max-width: 809.98px)"
+                bp_name = "tablet_portrait"
+            elif w and w <= 1024:
+                media_query = "@media (min-width: 810px) and (max-width: 1024px)"
+                bp_name = "tablet"
+            elif w and w <= 1280:
+                media_query = "@media (min-width: 1025px) and (max-width: 1280px)"
+                bp_name = "laptop"
+            elif w and w >= 1920:
+                media_query = "@media (min-width: 1920px)"
+                bp_name = "widescreen"
+            elif vp_key in ("mobile", "tablet", "laptop", "widescreen"):
+                bp_name = vp_key
+                mq_map = {
+                    "mobile": "@media (max-width: 768px)",
+                    "tablet_portrait": "@media (min-width: 481px) and (max-width: 809.98px)",
+                    "tablet": "@media (min-width: 810px) and (max-width: 1024px)",
+                    "laptop": "@media (min-width: 1025px) and (max-width: 1280px)",
+                    "widescreen": "@media (min-width: 1920px)",
+                }
+                media_query = mq_map.get(vp_key, "@media (max-width: 768px)")
+            else:
+                bp_name = vp_key
+                media_query = f"@media (max-width: {w}px)" if w else "@media (max-width: 768px)"
+
+            target_nodes: dict[str, dict[str, Any]] = {}
+            collect_nodes(vp_dom, target_nodes)
+
+            for key, d_node in desktop_nodes.items():
+                if key in target_nodes:
+                    t_node = target_nodes[key]
+                    d_styles = d_node.get("styles", {}) or {}
+                    t_styles = t_node.get("styles", {}) or {}
+
+                    diffs: dict[str, Any] = {}
+                    for prop in properties_to_check:
+                        d_val = d_styles.get(prop)
+                        t_val = t_styles.get(prop)
+                        if d_val and t_val and d_val != t_val:
+                            if d_val in ("auto", "none", "0px") and t_val in ("auto", "none", "0px"):
+                                continue
+                            diffs[prop] = {
+                                "desktop": d_val,
+                                bp_name: t_val,
+                                "target": t_val,
+                            }
+
+                    if diffs:
+                        node_id = d_node.get("id")
+                        raw_classes = [c for c in d_node.get("classes", []) if not c.startswith("motion-")]
+                        # Clean classes to valid CSS identifiers
+                        classes = [re.sub(r"[^a-zA-Z0-9_-]", "", c) for c in raw_classes if c]
+                        classes = [c for c in classes if c]
+                        tag = d_node.get("tag", "div")
+
+                        if node_id and not node_id.isdigit():
+                            clean_selector = f"#{node_id}"
+                        elif classes:
+                            clean_selector = "." + ".".join(classes)
+                        else:
+                            clean_selector = tag
+
+                        rule_id = f"{media_query}_{clean_selector}"
+                        if rule_id not in seen_rule_keys:
+                            seen_rule_keys.add(rule_id)
+                            rules.append({
+                                "selector": clean_selector,
+                                "raw_key": key,
+                                "tag": tag,
+                                "media_query": media_query,
+                                "breakpoint": bp_name,
+                                "diffs": diffs,
+                            })
+
+        return rules

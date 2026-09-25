@@ -57,6 +57,7 @@ class ReactProjectGenerator:
         self._write_global_styles()
         self._write_components()
         self._write_pages()
+        self._write_not_found_page()
         self._write_data()
         self._write_analysis()
 
@@ -556,6 +557,58 @@ export default function RootLayout({{
             media_block += "\n@media (max-width: 1024px) {\n" + "\n\n".join(tablet_media_rules) + "\n}\n"
         if mobile_media_rules:
             media_block += "\n@media (max-width: 768px) {\n" + "\n\n".join(mobile_media_rules) + "\n}\n"
+        # Emit element transitions (with preserved cubic-bezier / steps timing functions)
+        element_transitions = self.ir.get("animations", {}).get("element_transitions", {})
+        for sel, t_cfg in element_transitions.items():
+            tf = t_cfg.get("timing_function") or t_cfg.get("easing") or t_cfg.get("ease")
+            dur = t_cfg.get("duration", 0.3)
+            if tf:
+                style_rules.append(f"{sel} {{\n  transition: all {dur}s {tf} !important;\n}}")
+
+        # Process authoritative responsive rules from SiteIR
+        responsive_rules = self.ir.get("responsive_rules", [])
+        ir_media_blocks: dict[str, list[str]] = {}
+
+        for r in responsive_rules:
+            mq = r.get("media_query") or "@media (max-width: 768px)"
+            sel = r.get("selector")
+            if not sel or not r.get("diffs"):
+                continue
+
+            if "_" in sel and not (sel.startswith(".") or sel.startswith("#")):
+                parts = sel.split("_")
+                if len(parts) >= 3 and parts[2].strip():
+                    sel = "." + ".".join(parts[2].strip().split())
+                elif parts[0]:
+                    sel = parts[0]
+
+            prop_lines = []
+            bp = r.get("breakpoint", "")
+            for prop, val_data in r["diffs"].items():
+                kebab_prop = re.sub(r"([A-Z])", r"-\1", prop).lower()
+                val = None
+                if isinstance(val_data, dict):
+                    val = val_data.get(bp) or val_data.get("target") or val_data.get("mobile") or next((v for k, v in val_data.items() if k != "desktop"), None)
+                else:
+                    val = val_data
+                if val:
+                    prop_lines.append(f"    {kebab_prop}: {val} !important;")
+
+            if prop_lines:
+                ir_media_blocks.setdefault(mq, []).append(f"  {sel} {{\n" + "\n".join(prop_lines) + "\n  }")
+
+        if "@media (max-width: 768px)" not in ir_media_blocks:
+            ir_media_blocks["@media (max-width: 768px)"] = []
+        ir_media_blocks["@media (max-width: 768px)"].insert(0, """  html, body {
+    max-width: 100vw;
+  }
+  .wx-container {
+    padding: 0 16px;
+    max-width: 100%;
+  }""")
+
+        for mq, rules in sorted(ir_media_blocks.items()):
+            media_block += f"\n{mq} {{\n" + "\n\n".join(rules) + "\n}\n"
 
         # Source-extracted rules (font-faces, relevant classes, media rules, keyframes)
         source_rules = self.ir.get("component_styles", {}).get("source_rules", {})
@@ -568,6 +621,19 @@ export default function RootLayout({{
         source_class_block = ("\n\n/* Source Extracted Element Styles */\n" + "\n\n".join(class_rules)) if class_rules else ""
         source_keyframes_block = ("\n\n/* Source Extracted Keyframes */\n" + "\n\n".join(keyframes)) if keyframes else ""
         source_media_block = ("\n\n/* Source Extracted Responsive Rules */\n" + "\n\n".join(source_media_rules)) if source_media_rules else ""
+
+        # Preserved element transitions (cubic-bezier / steps / explicit durations)
+        element_transitions = self.ir.get("animations", {}).get("element_transitions", {})
+        element_trans_block = ""
+        if element_transitions:
+            trans_rules = []
+            for sel, t_cfg in element_transitions.items():
+                tf = t_cfg.get("timing_function") or t_cfg.get("easing") or t_cfg.get("ease")
+                d_val = t_cfg.get("duration", 0.3)
+                if tf:
+                    trans_rules.append(f"{sel} {{\n  transition: all {d_val}s {tf} !important;\n}}")
+            if trans_rules:
+                element_trans_block = "\n\n/* Element Transitions (Preserved Curves) */\n" + "\n\n".join(trans_rules)
 
         css_content = font_face_block + """\
 * {
@@ -622,7 +688,7 @@ body.has-custom-cursor * {
 }
 
 /* Component Classes */
-""" + "\n\n".join(style_rules) + source_class_block + source_keyframes_block + media_block + source_media_block
+""" + "\n\n".join(style_rules) + source_class_block + source_keyframes_block + element_trans_block + media_block + source_media_block
 
         # Append responsive fallback after media queries to ensure single-variant SSR components remain visible across all viewports
         css_content += """
@@ -1064,6 +1130,8 @@ export default function MotionRuntime({
       return null;
     };
 
+    const defaultTimingFunction = (animations && (animations.timing_function || animations.default_timing_function || animations.default_easing)) || "cubic-bezier(0.25, 0.1, 0.25, 1)";
+
     // 1. Process Appear / Motion Configs
     Object.entries(appearMap).forEach(([targetId, config]) => {
       const el = findTarget(targetId);
@@ -1090,10 +1158,11 @@ export default function MotionRuntime({
             { opacity: initOpacity, transform: initTransform },
             { opacity: targetOpacity, transform: targetTransform },
           ];
+          const easing = transition.timing_function || transition.easing || transition.ease || (transition.type === "spring" ? "cubic-bezier(0.16, 1, 0.3, 1)" : defaultTimingFunction);
           const anim = el.animate(keyframes, {
             duration: durationMs,
             delay: delayMs,
-            easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+            easing: easing,
             fill: "both",
             iterations: isContinuous ? Infinity : 1,
             direction: isContinuous ? "alternate" : "normal",
@@ -1133,6 +1202,7 @@ export default function MotionRuntime({
       if (Object.keys(hover).length > 0) {
         const hoverTransform = getTransform(hover);
         const hoverOpacity = hover.opacity !== undefined ? hover.opacity : targetOpacity;
+        const hoverEasing = hover.transition?.timing_function || hover.transition?.easing || defaultTimingFunction;
 
         const onPointerEnter = () => {
           el.animate(
@@ -1140,7 +1210,7 @@ export default function MotionRuntime({
               { opacity: targetOpacity, transform: targetTransform },
               { opacity: hoverOpacity, transform: hoverTransform },
             ],
-            { duration: 250, fill: "forwards", easing: "ease-out" }
+            { duration: 250, fill: "forwards", easing: hoverEasing }
           );
         };
         const onPointerLeave = () => {
@@ -1149,7 +1219,7 @@ export default function MotionRuntime({
               { opacity: hoverOpacity, transform: hoverTransform },
               { opacity: targetOpacity, transform: targetTransform },
             ],
-            { duration: 300, fill: "forwards", easing: "ease-out" }
+            { duration: 300, fill: "forwards", easing: hoverEasing }
           );
         };
         el.addEventListener("pointerenter", onPointerEnter);
@@ -1163,16 +1233,17 @@ export default function MotionRuntime({
       // Press / tap interaction variant
       if (Object.keys(press).length > 0) {
         const pressTransform = getTransform(press);
+        const pressEasing = press.transition?.timing_function || press.transition?.easing || defaultTimingFunction;
         const onPointerDown = () => {
           el.animate(
             [{ transform: targetTransform }, { transform: pressTransform }],
-            { duration: 150, fill: "forwards", easing: "ease-out" }
+            { duration: 150, fill: "forwards", easing: pressEasing }
           );
         };
         const onPointerUp = () => {
           el.animate(
             [{ transform: pressTransform }, { transform: targetTransform }],
-            { duration: 200, fill: "forwards", easing: "ease-out" }
+            { duration: 200, fill: "forwards", easing: pressEasing }
           );
         };
         el.addEventListener("pointerdown", onPointerDown);
@@ -2186,6 +2257,63 @@ export default function {comp_name}() {{
         </p>
       </section>
     </main>
+  );
+}}
+""",
+        )
+
+    def _write_not_found_page(self):
+        """Next.js requires a dedicated app/not-found.tsx to render a custom 404
+        instead of the framework default. Use captured /404 content if the crawl
+        found a real 404 route; otherwise emit a branded fallback using the
+        site's own nav/footer components."""
+        pages = self.ir.get("pages", [])
+        matched = next(
+            (p for p in pages if p.get("route") in ("/404", "404", "/not-found")),
+            None,
+        )
+
+        if matched and matched.get("dom"):
+            jsx_body = self.emitter.emit_jsx(matched["dom"], depth=3, is_root=False)
+            self._text(
+                "app/not-found.tsx",
+                f"""import React from "react";
+
+export default function NotFound() {{
+  return (
+    <main>
+{jsx_body}    </main>
+  );
+}}
+""",
+            )
+            return
+
+        nav_name, footer_name = self._find_nav_and_footer()
+        nav_import = f'import {nav_name} from "../components/{nav_name}";\n' if nav_name else ""
+        nav_tag = f"      <{nav_name} />\n" if nav_name else ""
+        footer_import = f'import {footer_name} from "../components/{footer_name}";\n' if footer_name else ""
+        footer_tag = f"      <{footer_name} />\n" if footer_name else ""
+
+        self._text(
+            "app/not-found.tsx",
+            f"""import React from "react";
+{nav_import}{footer_import}
+export default function NotFound() {{
+  return (
+    <main>
+{nav_tag}      <section style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "160px 24px 120px", minHeight: "60vh", textAlign: "center" }}}}>
+        <h1 style={{{{ fontFamily: "var(--font-display)", fontSize: "clamp(48px, 8vw, 96px)", fontWeight: 700 }}}}>
+          404
+        </h1>
+        <p style={{{{ opacity: 0.6, marginTop: "16px" }}}}>
+          This page could not be found.
+        </p>
+        <a href="/" style={{{{ display: "inline-block", marginTop: "32px", textDecoration: "underline" }}}}>
+          ← Back home
+        </a>
+      </section>
+{footer_tag}    </main>
   );
 }}
 """,

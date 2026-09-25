@@ -56,3 +56,61 @@ src/webextractor/verify/
 ├── visual_diff.py
 ├── dom_diff.py
 └── report.py
+
+
+
+
+
+
+
+
+
+We should establish a "STATIC FIDELITY GATE"
+
+Before WebExtractor is allowed to work on animations:
+
+Gate 1 — Assets
+✓ correct images
+✓ correct videos
+✓ correct fonts
+✓ correct SVGs
+Gate 2 — Structure
+✓ routes
+✓ sections
+✓ component hierarchy
+✓ text
+✓ links
+Gate 3 — Geometry
+✓ widths
+✓ heights
+✓ positions
+✓ margins
+✓ padding
+✓ gaps
+✓ stacking
+✓ overflow
+Gate 4 — Typography
+✓ font family
+✓ weight
+✓ size
+✓ line height
+✓ letter spacing
+✓ wrapping
+Gate 5 — Responsive
+✓ 375
+✓ 768
+✓ 1024
+✓ 1440
+✓ 1920
+
+Only after all five are reasonably close:
+
+STATIC = PASS
+
+Then:
+
+Gate 6 → interactions
+Gate 7 → transitions
+Gate 8 → scroll animations
+Gate 9 → parallax
+Gate 10 → sequencing/timing

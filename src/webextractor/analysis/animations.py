@@ -28,17 +28,24 @@ class AnimationExtractor:
     ) -> dict[str, Any]:
         merged: dict[str, Any] = {
             "appear_animations": {},
+            "element_transitions": {},
             "keyframes": [],
             "has_cursor": False,
             "has_time_component": False,
             "parallax_elements": [],
             "motion_triggers": [],
+            "default_transition_duration": 0.6,
+            "default_timing_function": None,
+            "default_easing": None,
+            "timing_function": None,
         }
 
         for adapter in self.adapters:
             if adapter.can_handle(html_content, css_content):
                 res = adapter.extract_motion(html_content, css_content)
                 merged["appear_animations"].update(res.get("appear_animations", {}))
+                if res.get("element_transitions"):
+                    merged["element_transitions"].update(res["element_transitions"])
                 merged["keyframes"].extend(res.get("keyframes", []))
                 if res.get("has_cursor"):
                     merged["has_cursor"] = True
@@ -46,6 +53,13 @@ class AnimationExtractor:
                     merged["has_time_component"] = True
                 merged["parallax_elements"].extend(res.get("parallax_elements", []))
                 merged["motion_triggers"].extend(res.get("motion_triggers", []))
+                if res.get("default_transition_duration"):
+                    merged["default_transition_duration"] = res["default_transition_duration"]
+                tf_val = res.get("default_timing_function") or res.get("default_easing") or res.get("timing_function")
+                if tf_val:
+                    merged["default_timing_function"] = tf_val
+                    merged["default_easing"] = tf_val
+                    merged["timing_function"] = tf_val
 
         # Deduplicate list elements preserving order
         merged["parallax_elements"] = list(dict.fromkeys(merged["parallax_elements"]))

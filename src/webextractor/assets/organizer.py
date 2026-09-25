@@ -20,11 +20,17 @@ class AssetOrganizer:
             AssetType.FONT: public_dir / "fonts",
             AssetType.VIDEO: public_dir / "videos",
             AssetType.DOCUMENT: public_dir / "documents",
+            AssetType.JAVASCRIPT: public_dir / "scripts",
+            AssetType.CSS: public_dir / "styles",
+            AssetType.HTML: public_dir / "documents",
+            AssetType.OTHER: public_dir / "misc",
         }
 
         for d in set(subdirs.values()):
             d.mkdir(parents=True, exist_ok=True)
         (public_dir / "icons").mkdir(parents=True, exist_ok=True)
+        (public_dir / "scripts").mkdir(parents=True, exist_ok=True)
+        (public_dir / "styles").mkdir(parents=True, exist_ok=True)
 
         seen_dest_filenames: set[str] = set()
 
@@ -35,7 +41,37 @@ class AssetOrganizer:
                 asset.public_url = None
                 continue
 
-            target_folder = subdirs.get(asset.asset_type, public_dir / "images")
+            # Strict evidence-based categorization: MIME type, Content-Type, and extension
+            ext = (asset.extension or Path(urlparse(asset.url).path).suffix.lstrip(".")).lower()
+            mime = (asset.mime_type or "").lower()
+
+            if ext in ("js", "mjs", "ts", "jsx", "tsx", "cjs") or "javascript" in mime or "ecmascript" in mime:
+                target_folder = public_dir / "scripts"
+                asset.asset_type = AssetType.JAVASCRIPT
+            elif ext in ("css",) or "css" in mime:
+                target_folder = public_dir / "styles"
+                asset.asset_type = AssetType.CSS
+            elif ext in ("html", "htm", "framercms") or "html" in mime:
+                target_folder = public_dir / "documents"
+                asset.asset_type = AssetType.HTML
+            elif ext in ("woff", "woff2", "ttf", "otf", "eot") or "font" in mime:
+                target_folder = public_dir / "fonts"
+                asset.asset_type = AssetType.FONT
+            elif ext in ("mp4", "webm", "ogg", "mov") or "video" in mime:
+                target_folder = public_dir / "videos"
+                asset.asset_type = AssetType.VIDEO
+            elif ext in ("svg",) or "svg" in mime:
+                target_folder = public_dir / "icons"
+                asset.asset_type = AssetType.IMAGE
+            elif ext in ("png", "jpg", "jpeg", "webp", "gif", "ico", "avif") or "image" in mime:
+                target_folder = public_dir / "images"
+                asset.asset_type = AssetType.IMAGE
+            elif ext in ("pdf", "txt", "xml", "json", "doc", "docx") or "pdf" in mime or "json" in mime:
+                target_folder = public_dir / "documents"
+                asset.asset_type = AssetType.DOCUMENT
+            else:
+                target_folder = subdirs.get(asset.asset_type, public_dir / "misc")
+
             folder_name = target_folder.name
 
             # Determine clean, collision-free filename

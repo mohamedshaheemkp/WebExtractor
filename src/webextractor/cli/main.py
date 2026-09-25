@@ -44,6 +44,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Destination directory for generated project.",
     )
+    rip_parser.add_argument(
+        "-t",
+        "--target-framework",
+        dest="target_framework",
+        type=str,
+        choices=["next", "html"],
+        default="next",
+        help="Target generation format: 'next' (Next.js App Router) or 'html' (Standalone static HTML/CSS/JS).",
+    )
+    rip_parser.add_argument(
+        "--viewports",
+        type=str,
+        default=None,
+        help="Comma-separated viewport widths (e.g. '375,768,1024,1440,1920').",
+    )
+    rip_parser.add_argument(
+        "--audit",
+        action="store_true",
+        default=True,
+        help="Run comprehensive multi-signal validation audit.",
+    )
 
     # Command: extract (Asset extraction only)
     extract_parser = subparsers.add_parser(
@@ -105,7 +126,15 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "rip":
-        asyncio.run(execute_rip(args.target, args.output))
+        asyncio.run(
+            execute_rip(
+                args.target,
+                args.output,
+                target_framework=getattr(args, "target_framework", "next"),
+                viewports_str=getattr(args, "viewports", None),
+                audit=getattr(args, "audit", True),
+            )
+        )
     elif args.command == "extract":
         asyncio.run(execute_extract(args.har_file, args.output, args.workers))
     elif args.command == "inspect":

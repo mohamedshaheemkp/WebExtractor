@@ -27,9 +27,26 @@ from webextractor.verification.visual_diff import VisualDiffScorer
 console = Console(legacy_windows=False)
 
 
-async def execute_rip(target: str, output_dir: Path | None = None) -> None:
+async def execute_rip(
+    target: str,
+    output_dir: Path | None = None,
+    target_framework: str = "next",
+    viewports_str: str | None = None,
+    audit: bool = True,
+) -> None:
     is_url = target.startswith("http://") or target.startswith("https://")
     target_path = Path(target) if not is_url else None
+
+    # Parse custom viewports if provided
+    custom_viewports = None
+    if viewports_str:
+        custom_viewports = {}
+        parts = [p.strip() for p in viewports_str.split(",") if p.strip()]
+        for p in parts:
+            if p.isdigit():
+                w = int(p)
+                h = int(w * 0.75) if w > 500 else 812
+                custom_viewports[f"vp_{w}"] = {"width": w, "height": h}
 
     # Derive Project / Site Name
     if is_url:
@@ -57,14 +74,21 @@ async def execute_rip(target: str, output_dir: Path | None = None) -> None:
     if is_url:
         console.print("[bold cyan][1/6] Launching browser & capturing site[/bold cyan]")
         try:
-            crawler = WebsiteCrawler(dest_dir / "capture")
+            crawler = WebsiteCrawler(dest_dir / "capture", viewports=custom_viewports)
             capture = await crawler.crawl(target)
             console.print("      [green]✓[/green] Browser snapshot captured")
 
             html_content = capture.get("html", "")
-            routes = RouteAnalyzer.analyze_routes(html_content, site_name)
+            routes = RouteAnalyzer.analyze_routes(html_content, target)
             console.print(f"      [green]✓[/green] {len(routes)} routes discovered")
             console.print(f"      [green]✓[/green] {len(capture.get('requests', []))} network requests recorded")
+            failed_routes = capture.get("failed_routes", [])
+            if failed_routes:
+                console.print(
+                    f"      [yellow]⚠[/yellow] {len(failed_routes)} route(s) failed to capture and will fall back to placeholder content:"
+                )
+                for fr in failed_routes:
+                    console.print(f"          [yellow]•[/yellow] {fr['route']} — {fr['error']}")
         except Exception as e:
             console.print(f"      [yellow]Browser capture notice:[/yellow] {e}")
             console.print("      Falling back to direct HTTP ingestion...")
@@ -81,7 +105,7 @@ async def execute_rip(target: str, output_dir: Path | None = None) -> None:
                             "requests": [{"url": target, "method": "GET", "resource_type": "document"}],
                             "viewports": {},
                         }
-                        routes = RouteAnalyzer.analyze_routes(html_content, site_name)
+                        routes = RouteAnalyzer.analyze_routes(html_content, target)
                         console.print("      [green]✓[/green] Direct HTTP capture successful")
             except Exception as fallback_err:
                 console.print(f"      [bold red]HTTP fallback failed:[/bold red] {fallback_err}")
@@ -175,41 +199,64 @@ async def execute_rip(target: str, output_dir: Path | None = None) -> None:
     console.print(f"      [green]✓[/green] {len(site_ir.interactions)} behavioral interactions reconstructed (menus, transitions, triggers)")
     console.print("      [green]✓[/green] Canonical SiteIR persisted to analysis/")
 
-    # [6/6] GENERATING REACT & NEXT.JS AND VERIFYING INTEGRITY
-    console.print("\n[bold cyan][6/6] Generating React & Next.js App Router[/bold cyan]")
-    generator = ReactProjectGenerator(site_ir, dest_dir)
-    generated_path = generator.generate()
-    console.print("      [green]✓[/green] TypeScript + Tailwind CSS configured")
-    console.print("      [green]✓[/green] App Router (app/layout.tsx, app/page.tsx, sub-routes)")
-    console.print(f"      [green]✓[/green] Reusable components placed in components/")
-    console.print("      [green]✓[/green] Design-system tokens placed in styles/tokens.css")
+    # [6/6] CODE GENERATION & VERIFICATION
+    if target_framework == "html":
+        console.print("\n[bold cyan][6/6] Generating Standalone Static HTML/CSS/JS Project[/bold cyan]")
+        from webextractor.generator.static import StaticProjectGenerator
+        static_gen = StaticProjectGenerator(site_ir, dest_dir)
+        generated_path = static_gen.generate()
+        console.print("      [green]✓[/green] Standalone HTML5 structure (index.html, sub-routes)")
+        console.print("      [green]✓[/green] CSS tokens & responsive rules (css/tokens.css, css/styles.css)")
+        console.print("      [green]✓[/green] Vanilla JS interaction & scroll runtime (js/app.js)")
+        console.print("      [green]✓[/green] Static assets organized in assets/")
+    else:
+        console.print("\n[bold cyan][6/6] Generating React & Next.js App Router[/bold cyan]")
+        generator = ReactProjectGenerator(site_ir, dest_dir)
+        generated_path = generator.generate()
+        console.print("      [green]✓[/green] TypeScript + Tailwind CSS configured")
+        console.print("      [green]✓[/green] App Router (app/layout.tsx, app/page.tsx, sub-routes)")
+        console.print(f"      [green]✓[/green] Reusable components placed in components/")
+        console.print("      [green]✓[/green] Design-system tokens placed in styles/tokens.css")
 
-    # Verification & Artifact Integrity Audit
-    public_files = [f for f in (dest_dir / "public").rglob("*") if f.is_file()]
-    colors_count = len(site_ir.design_system.get("colors", {}))
-    similarity = VisualDiffScorer.calculate_score(
-        components_count=num_components,
-        downloaded_assets=downloaded_cnt,
-        total_assets=len(assets) if assets else 1,
-        tokens_count=colors_count,
+    # Multi-Signal Verification Audit
+    fidelity = VisualDiffScorer.evaluate_fidelity(
+        output_dir=dest_dir,
+        site_ir=site_ir,
+        original_capture=capture,
     )
+    similarity = fidelity["overall_score"]
+    colors_count = len(site_ir.design_system.get("colors", {}))
+
     VerificationReport.write_report(
         dest_dir / "analysis",
         similarity_score=similarity,
         components_count=num_components,
         assets_count=len(assets),
         tokens_count=colors_count,
+        fidelity_assessment=fidelity,
     )
 
-    console.print("\n[bold cyan]Artifact Integrity Audit:[/bold cyan]")
-    console.print(f"      • Public files physically present: [bold]{len(public_files)}[/bold]")
-    console.print(f"      • Assets downloaded: [bold]{downloaded_cnt}/{len(assets)}[/bold]")
-    console.print(f"      • Component count: [bold]{num_components}[/bold]")
-    console.print(f"      • Structural similarity heuristic: [bold]{similarity}%[/bold]")
+    console.print("\n[bold cyan]Multi-Signal Verification Audit:[/bold cyan]")
+    cats = fidelity.get("categories", {})
+    for cat_name, cat_data in cats.items():
+        c_stat = cat_data.get("status", "PASS")
+        c_score = cat_data.get("score", 100.0)
+        c_color = "green" if c_stat == "PASS" else ("yellow" if c_stat == "WARN" else "red")
+        cat_title = cat_name.capitalize().ljust(16)
+        console.print(f"      • {cat_title} [{c_color}]{c_stat.ljust(5)}[/{c_color}] ({c_score}%) — {cat_data.get('details', '')}")
+
+    overall_color = "green" if fidelity["status"] == "PASS" else ("yellow" if fidelity["status"] == "WARN" else "red")
+    console.print(f"\n      [bold]Overall Fidelity:[/] [{overall_color} bold]{similarity}% [{fidelity['status']}][/{overall_color} bold]")
 
     console.print("\n[bold green]Project generated successfully![/bold green]")
     console.print(f"  [cyan]{generated_path.resolve()}[/cyan]\n")
-    console.print("[bold]Next steps to run the reconstructed site:[/bold]")
-    console.print(f"  cd {dest_dir}")
-    console.print("  npm install")
-    console.print("  npm run dev\n")
+
+    if target_framework == "html":
+        console.print("[bold]Next steps to view the static site:[/bold]")
+        console.print(f"  Double-click {dest_dir / 'index.html'} or run:")
+        console.print(f"  python -m http.server 3000 --directory {dest_dir}\n")
+    else:
+        console.print("[bold]Next steps to run the reconstructed site:[/bold]")
+        console.print(f"  cd {dest_dir}")
+        console.print("  npm install")
+        console.print("  npm run dev\n")

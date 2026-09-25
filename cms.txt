@@ -1,0 +1,25 @@
+4 Ways to Save Your CMS Content
+1
+Export as a static snapshot
+Best for: sites with fewer than 50 CMS items
+When you export your Framer site, every published CMS page is included as a standalone HTML file. A blog with 30 posts becomes 30 individual HTML pages. The content is all there. It is just frozen in place. If you need to update something later, you edit the HTML directly or re-export from Framer.
+
+This is the simplest approach. If your CMS usage is light (a few case studies, a handful of blog posts), the static export is good enough.
+
+2
+Use Framer's Official CMS Export Plugin
+Best for: anyone (no code required)
+Framer has an official CMS Export plugin (24,800+ users) that exports any CMS collection as a CSV file. Open your Framer project, go to Plugins → search "CMS Export" → select your collection → preview → download CSV. You get all titles, slugs, body text, images, and metadata in a structured format you can import into Sanity, Contentful, WordPress, Notion, or a spreadsheet. Do this before you cancel your Framer plan.
+
+3
+Use the Framer Server API (for developers)
+Best for: developers migrating to a new platform
+Framer's Server API (free during beta) lets you programmatically access CMS collections from any server. Generate an API key in Site Settings → General, install the
+framer-api
+npm package, and pull your collections as structured data. This is ideal for batch-migrating to Supabase, Sanity, or your own database.
+
+npm install framer-api // backup-cms.js import { connect } from "framer-api" const project = await connect({ apiKey: "YOUR_KEY" }) const collections = await project.getCollections() // Export each collection's items as JSON
+4
+Migrate to Supabase (no item caps, free)
+Best for: outgrowing Framer's CMS limits
+Export your CMS data via the plugin (CSV) or Server API, then import into Supabase (free tier: 50,000 rows, 500MB storage). You get a real Postgres database with no item caps, an API out of the box, and full SQL access. Use AI tools like Cursor or Claude to connect your exported Framer site to Supabase. Describe what you want in plain English and the AI writes the integration code.

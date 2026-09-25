@@ -36,6 +36,7 @@ class WebsiteCrawler:
         same_origin: bool = True,
         include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
+        viewports: dict[str, dict[str, int]] | None = None,
     ):
         self.output_dir = Path(output_dir)
         self.max_routes = max_routes
@@ -43,6 +44,7 @@ class WebsiteCrawler:
         self.same_origin = same_origin
         self.include_patterns = include_patterns or []
         self.exclude_patterns = exclude_patterns or []
+        self.viewports = viewports
 
     def normalize_route(self, raw_url: str, base_url: str) -> tuple[str, str] | None:
         """
@@ -118,6 +120,7 @@ class WebsiteCrawler:
             visited_routes: set[str] = set()
             captured_pages: list[dict[str, Any]] = []
             all_requests: list[dict[str, Any]] = []
+            failed_routes: list[dict[str, str]] = []
 
             while queue and len(captured_pages) < self.max_routes:
                 cur_url, cur_route, cur_depth = queue.popleft()
@@ -130,8 +133,11 @@ class WebsiteCrawler:
                 screenshot_name = f"{slug}.png"
 
                 try:
-                    page_capture = await browser.capture(cur_url, screenshot_name=screenshot_name)
-                except Exception:
+                    page_capture = await browser.capture(
+                        cur_url, screenshot_name=screenshot_name, id_prefix=f"wx-{slug}"
+                    )
+                except Exception as e:
+                    failed_routes.append({"route": cur_route, "url": cur_url, "error": str(e)})
                     continue
 
                 page_capture["route"] = cur_route
@@ -155,7 +161,7 @@ class WebsiteCrawler:
 
             # Capture responsive viewports on primary page
             if browser.context:
-                multi_vp = MultiViewportCapture(self.output_dir)
+                multi_vp = MultiViewportCapture(self.output_dir, viewports=self.viewports)
                 vp_results = await multi_vp.capture_all(browser.context, root_url)
                 primary_capture["viewports"] = vp_results.get("viewports", {})
                 primary_capture["responsive_rules"] = vp_results.get("responsive_rules", [])
@@ -179,6 +185,15 @@ class WebsiteCrawler:
             primary_capture["pages"] = captured_pages
             primary_capture["routes"] = [p["route"] for p in captured_pages]
             primary_capture["requests"] = all_requests
+            primary_capture["failed_routes"] = failed_routes
+            # Merge CSS and scroll-reveal signals discovered across every
+            # crawled page, not just the homepage.
+            primary_capture["css"] = "\n".join(
+                dict.fromkeys(cp.get("css", "") for cp in captured_pages if cp.get("css"))
+            )
+            primary_capture["reveal_candidates"] = [
+                rc for cp in captured_pages for rc in cp.get("reveal_candidates", [])
+            ]
 
             writer = SnapshotWriter(
                 self.output_dir,

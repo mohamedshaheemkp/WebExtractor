@@ -54,6 +54,7 @@ class BrowserCapture:
         self,
         url: str,
         screenshot_name: str | None = None,
+        id_prefix: str = "wx",
     ) -> dict[str, Any]:
 
         if self.context is None:
@@ -81,13 +82,126 @@ class BrowserCapture:
                 timeout=60_000,
             )
 
-            # Give client-side applications time to render.
+            # Give client-side applications time to render and any
+            # mount/load-triggered animations to settle, so the pre-scroll
+            # sample below reflects only elements still waiting to reveal.
             await page.wait_for_timeout(3000)
 
-            # Trigger lazy-loaded content.
+            # 1. PRE-SCROLL SAMPLE: fingerprint elements that are still
+            # faded/offset before anything below the fold has been triggered.
+            # These are the candidates for scroll-reveal animations,
+            # regardless of which library (Framer, AOS, GSAP, custom
+            # IntersectionObserver, etc.) implements them.
+            await page.evaluate(
+                """
+                (prefix) => {
+                    const initial = {};
+                    let counter = 0;
+                    document.querySelectorAll('body *').forEach((el) => {
+                        const tag = el.tagName;
+                        if (['SCRIPT','STYLE','NOSCRIPT'].includes(tag)) return;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width < 2 || rect.height < 2) return;
+                        const cs = window.getComputedStyle(el);
+                        const opacity = parseFloat(cs.opacity);
+                        let tx = 0, ty = 0;
+                        try {
+                            const m = new DOMMatrixReadOnly(cs.transform);
+                            tx = m.m41; ty = m.m42;
+                        } catch (e) {}
+                        if (opacity < 0.98 || Math.abs(ty) > 4 || Math.abs(tx) > 4) {
+                            const id = prefix + '-' + (counter++);
+                            el.setAttribute('data-wx-scan-id', id);
+                            initial[id] = { opacity, tx, ty };
+                        }
+                    });
+                    window.__wxInitial = initial;
+                }
+                """,
+                id_prefix,
+            )
+
+            # Trigger lazy-loaded content and any scroll-linked reveals.
             await self._scroll_page(page)
 
             await page.wait_for_timeout(1500)
+
+            # 2. POST-SCROLL DIFF: elements whose opacity/transform changed
+            # meaningfully were revealed by scroll. Tag them with
+            # data-motion-id (the attribute MotionRuntime/DomToJsxEmitter
+            # already recognize) so it's baked into the captured HTML/DOM.
+            reveal_candidates = await page.evaluate(
+                """
+                () => {
+                    const initial = window.__wxInitial || {};
+                    const results = [];
+                    Object.keys(initial).forEach((id) => {
+                        const el = document.querySelector(`[data-wx-scan-id="${id}"]`);
+                        if (!el) return;
+                        const cs = window.getComputedStyle(el);
+                        const opacity = parseFloat(cs.opacity);
+                        let tx = 0, ty = 0;
+                        try {
+                            const m = new DOMMatrixReadOnly(cs.transform);
+                            tx = m.m41; ty = m.m42;
+                        } catch (e) {}
+                        const before = initial[id];
+                        const opacityDelta = Math.abs(opacity - before.opacity);
+                        const tyDelta = Math.abs(ty - before.ty);
+                        const txDelta = Math.abs(tx - before.tx);
+                        if (opacityDelta > 0.15 || tyDelta > 6 || txDelta > 6) {
+                            el.setAttribute('data-motion-id', id);
+                            let easing = null;
+                            let duration = null;
+                            if (cs.transitionDuration && cs.transitionDuration !== '0s') {
+                                duration = cs.transitionDuration;
+                                if (cs.transitionTimingFunction && cs.transitionTimingFunction !== 'ease') {
+                                    easing = cs.transitionTimingFunction;
+                                }
+                            }
+                            if (!easing && cs.animationTimingFunction && cs.animationTimingFunction !== 'ease') {
+                                easing = cs.animationTimingFunction;
+                            }
+                            results.push({
+                                id,
+                                initial: { opacity: before.opacity, x: before.tx, y: before.ty },
+                                final: { opacity, x: tx, y: ty },
+                                duration,
+                                easing,
+                            });
+                        }
+                        el.removeAttribute('data-wx-scan-id');
+                    });
+                    return results;
+                }
+                """
+            )
+
+            # 3. REAL CSS CAPTURE: inline <style> tags plus any stylesheet
+            # readable under CORS. Powers keyframe/transition detection that
+            # was previously starved of any actual CSS text.
+            css_text = await page.evaluate(
+                """
+                () => {
+                    const chunks = [];
+                    document.querySelectorAll('style').forEach((s) => {
+                        if (s.textContent) chunks.push(s.textContent);
+                    });
+                    for (const sheet of document.styleSheets) {
+                        try {
+                            const rules = sheet.cssRules;
+                            if (!rules) continue;
+                            let text = '';
+                            for (const r of rules) text += r.cssText + '\\n';
+                            chunks.push(text);
+                        } catch (e) {
+                            // Cross-origin stylesheet without CORS headers — unreadable, skip.
+                        }
+                    }
+                    return chunks.join('\\n');
+                }
+                """
+            )
 
             title = await page.title()
 
@@ -154,9 +268,13 @@ class BrowserCapture:
 
                         id: element.id || null,
 
-                        classes: Array.from(
-                            element.classList
-                        ),
+                        classes: Array.from(element.classList),
+
+                        attributes: {
+                            'data-framer-appear-id': element.getAttribute('data-framer-appear-id') || null,
+                            'data-motion-id': element.getAttribute('data-motion-id') || null,
+                            'data-aos': element.getAttribute('data-aos') || null,
+                        },
 
                         role:
                             element.getAttribute("role"),
@@ -246,6 +364,17 @@ class BrowserCapture:
                             letterSpacing: style.letterSpacing,
                             textTransform: style.textTransform,
                             textDecoration: style.textDecorationLine || style.textDecoration,
+                            transitionProperty: style.transitionProperty,
+                            transitionDuration: style.transitionDuration,
+                            transitionTimingFunction: style.transitionTimingFunction,
+                            transitionDelay: style.transitionDelay,
+                            animationName: style.animationName,
+                            animationDuration: style.animationDuration,
+                            animationTimingFunction: style.animationTimingFunction,
+                            animationDelay: style.animationDelay,
+                            animationIterationCount: style.animationIterationCount,
+                            transform: style.transform,
+                            willChange: style.willChange,
                         },
 
                         children
@@ -269,6 +398,8 @@ class BrowserCapture:
             "requests": network_requests,
             "screenshot": str(screenshot_path),
             "discovered_links": discovered_links or [],
+            "css": css_text or "",
+            "reveal_candidates": reveal_candidates or [],
             "viewport": {
                 "width": self.viewport_width,
                 "height": self.viewport_height,

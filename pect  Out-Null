@@ -1,0 +1,192 @@
+/**
+ * Website Exporter API Client
+ * RapidAPI integration for exporting websites as downloadable ZIP files.
+ */
+
+const BASE_URL = 'https://website-exporter.p.rapidapi.com';
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || '';
+const RAPIDAPI_HOST = 'website-exporter.p.rapidapi.com';
+
+function getHeaders(): HeadersInit {
+  return {
+    'X-RapidAPI-Key': RAPIDAPI_KEY,
+    'X-RapidAPI-Host': RAPIDAPI_HOST,
+    'Content-Type': 'application/json',
+  };
+}
+
+// Types
+export type ExportMode = 'single-page' | 'full-site-v1' | 'full-site-v2';
+
+export interface V1FullSiteResponse {
+  status: 'success' | 'error';
+  trackExportId?: string;
+  zipDownloadUrl?: string;
+  error?: string;
+}
+
+export interface V2EstimationResponse {
+  status: 'success' | 'error';
+  estimation?: {
+    totalPages: number;
+    estimatedAssets: number;
+    estimatedDurationSeconds: number;
+    estimatedDurationMinutes: number;
+  };
+  pages?: string[];
+  error?: string;
+}
+
+export interface V2StartExportResponse {
+  status: 'success' | 'error';
+  jobId?: string;
+  estimatedDurationSeconds?: number;
+  queuePosition?: number;
+  error?: string;
+}
+
+export interface V2JobProgress {
+  totalPages: number;
+  pagesExported: number;
+  totalAssets: number;
+  assetsDownloaded: number;
+  currentFile: string;
+  percentComplete: number;
+}
+
+export interface V2JobTiming {
+  estimatedTimeLeftSeconds: number;
+  estimatedDurationSeconds: number;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+}
+
+export interface V2JobResult {
+  exportId: string;
+  exportPath: string;
+  zipUrl: string;
+}
+
+export interface V2Job {
+  id: string;
+  siteUrl: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  progress: V2JobProgress;
+  timing: V2JobTiming;
+  result: V2JobResult | null;
+  error: string | null;
+}
+
+export interface V2CheckStatusResponse {
+  status: 'success' | 'error';
+  job?: V2Job;
+  error?: string;
+}
+
+/**
+ * V1 - Export single page with all assets packed into one HTML file
+ */
+export async function exportSinglePage(siteUrl: string): Promise<{ html: string; success: boolean }> {
+  const fullUrl = siteUrl.startsWith('http') ? siteUrl : `https://${siteUrl}`;
+  const url = `${BASE_URL}/api/v1/single-page?site=${encodeURIComponent(fullUrl)}`;
+
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: getHeaders(),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Single page export failed: ${response.status}`);
+  }
+
+  const html = await response.text();
+  return { html, success: true };
+}
+
+/**
+ * V1 - Export full site as ZIP (synchronous, quick export without all assets)
+ */
+export async function exportFullSiteV1(siteUrl: string): Promise<V1FullSiteResponse> {
+  const fullUrl = siteUrl.startsWith('http') ? siteUrl : `https://${siteUrl}`;
+  const url = `${BASE_URL}/api/v1/full-site-zip?site=${encodeURIComponent(fullUrl)}`;
+
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: getHeaders(),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Full site V1 export failed: ${response.status} - ${errorText}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * V2 - Estimate export time for a website
+ */
+export async function estimateExportTime(siteUrl: string): Promise<V2EstimationResponse> {
+  const cleanUrl = siteUrl.replace(/^https?:\/\//, '');
+
+  const response = await fetch(`${BASE_URL}/api/v2/estimate-time`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ siteUrl: cleanUrl }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Estimation failed: ${response.status} - ${errorText}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * V2 - Start full site export job (async with progress tracking)
+ */
+export async function startExportV2(
+  siteUrl: string,
+  options?: {
+    priority?: number;
+    metadata?: Record<string, unknown>;
+  }
+): Promise<V2StartExportResponse> {
+  const cleanUrl = siteUrl.replace(/^https?:\/\//, '');
+
+  const response = await fetch(`${BASE_URL}/api/v2/start-export`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({
+      siteUrl: cleanUrl,
+      priority: options?.priority ?? 1,
+      metadata: options?.metadata,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Start export V2 failed: ${response.status} - ${errorText}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * V2 - Check job status and progress
+ */
+export async function checkJobStatus(jobId: string): Promise<V2CheckStatusResponse> {
+  const response = await fetch(`${BASE_URL}/api/v2/check-status/${jobId}`, {
+    method: 'GET',
+    headers: getHeaders(),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Check status failed: ${response.status} - ${errorText}`);
+  }
+
+  return response.json();
+}

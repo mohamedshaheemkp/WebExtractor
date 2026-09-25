@@ -1,7 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from webextractor.constants import (
+    DEFAULT_VIEWPORTS,
     OUTPUT_DIR,
     DEFAULT_TIMEOUT,
     MAX_CONNECTIONS,
@@ -31,5 +33,13 @@ class Config:
 
     user_agent: str = USER_AGENT
 
+    target: str = "next"  # "next" or "html"
 
-config = Config()
+    audit: bool = True  # Run validation audit
+
+    viewports: dict[str, dict[str, int]] = field(
+        default_factory=lambda: dict(DEFAULT_VIEWPORTS)
+    )
+
+
+config = Config()

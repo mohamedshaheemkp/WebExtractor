@@ -1,0 +1,64 @@
+{
+  "name": "nocodexport",
+  "version": "1.0.0",
+  "description": "NoCodeXport - Framer website exporter (Web + Desktop)",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "dev:electron": "NODE_ENV=development electron .",
+    "build": "next build",
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make",
+    "make:mac": "electron-forge make --platform darwin",
+    "make:win": "electron-forge make --platform win32",
+    "make:linux": "electron-forge make --platform linux",
+    "publish": "electron-forge publish",
+    "lint": "next lint",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio"
+  },
+  "config": {},
+  "author": {
+    "name": "NoCodeXport",
+    "email": "nocodexport@example.com"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.11.1",
+    "@electron-forge/maker-dmg": "^7.11.1",
+    "@electron-forge/maker-rpm": "^7.11.1",
+    "@electron-forge/maker-squirrel": "^7.11.1",
+    "@electron-forge/maker-zip": "^7.11.1",
+    "@electron-forge/plugin-fuses": "^7.11.1",
+    "@electron/fuses": "^1.8.0",
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/bun": "latest",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.5",
+    "@types/react-dom": "^19.2.3",
+    "drizzle-kit": "^0.31.7",
+    "electron": "^39.3.0",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.34.5"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@auth/core": "^0.34.3",
+    "@auth/drizzle-adapter": "^1.11.1",
+    "autoprefixer": "^10.4.22",
+    "drizzle-orm": "^0.44.7",
+    "lucide-react": "^0.554.0",
+    "next": "16.0.10",
+    "next-auth": "^4.24.13",
+    "postcss": "^8.5.6",
+    "postgres": "^3.4.7",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "tailwindcss": "3"
+  }
+}

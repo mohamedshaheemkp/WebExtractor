@@ -186,6 +186,59 @@ class TestPhase6IPostCaptureFixes(unittest.TestCase):
         self.assertIn("revealedLinks.forEach", runtime_code)
         self.assertIn("cleanSel", runtime_code)
 
+    def test_not_found_page_generation(self):
+        """Verify app/not-found.tsx is generated with custom 404 page."""
+        site_ir = SiteIR(
+            metadata={"title": "404 Test"},
+            routes=["/"],
+            design_system={},
+            pages=[
+                {
+                    "route": "/",
+                    "components": [
+                        {"name": "Nav", "role": "navigation"},
+                        {"name": "Section_15", "role": "footer"},
+                    ],
+                }
+            ],
+        )
+
+        gen = ReactProjectGenerator(site_ir, self.output_dir)
+        gen.generate()
+
+        not_found_path = self.output_dir / "app/not-found.tsx"
+        self.assertTrue(not_found_path.exists())
+        not_found_code = not_found_path.read_text(encoding="utf-8")
+        self.assertIn("NotFound", not_found_code)
+        self.assertIn("404", not_found_code)
+        self.assertIn("Nav", not_found_code)
+        self.assertIn("Section_15", not_found_code)
+
+    def test_reveal_candidates_motion_merging(self):
+        """Verify generic scroll reveal candidates are merged into SiteIR animations."""
+        from webextractor.analysis.analyzer import SiteAnalyzer
+
+        analyzer = SiteAnalyzer()
+        capture = {
+            "url": "https://example.com",
+            "html": '<!DOCTYPE html><html><body><div data-motion-id="wx-1">Hello</div></body></html>',
+            "css": "div { transition: opacity 0.5s ease; }",
+            "reveal_candidates": [
+                {
+                    "id": "wx-1",
+                    "initial": {"opacity": 0.0, "x": 0.0, "y": 40.0},
+                    "final": {"opacity": 1.0, "x": 0.0, "y": 0.0},
+                }
+            ],
+        }
+        site_model = analyzer.analyze(capture)
+        animations = site_model.animations
+        self.assertIn("wx-1", animations.get("appear_animations", {}))
+        cfg = animations["appear_animations"]["wx-1"]
+        self.assertEqual(cfg["trigger"], "in_view")
+        self.assertEqual(cfg["initial"]["y"], 40.0)
+        self.assertEqual(cfg["initial"]["opacity"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
