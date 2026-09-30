@@ -30,37 +30,66 @@ WebExtractor inspects live websites or captured HTTP Archive (`.har`) files, rev
 
 ---
 
-## Workflow Overview
+## The WebExtractor Formula (System Architecture)
 
 ```text
-       Live Website (URL)                     Browser HAR File
-              │                                      │
-              ▼                                      ▼
-      Playwright Crawler                     HAR Parser Engine
-   (Multi-viewport, DOM, CSS)             (Requests, Payloads, Cache)
-              │                                      │
-              └──────────────────┬───────────────────┘
-                                 ▼
-                     Deep Site IR Analysis
-      ┌─────────────────────────────────────────────────────┐
-      │  • Framework Detection     • Typography Engine      │
-      │  • Component Clustering    • Layout & Flex/Grid     │
-      │  • Design System Tokens    • Route & Nav Discovery  │
-      │  • Motion & Interactions   • Canonical Asset Bindings│
-      └──────────────────────────┬──────────────────────────┘
-                                 ▼
-                    React & Next.js Code Generator
-      ┌─────────────────────────────────────────────────────┐
-      │  • Next.js App Router      • Tailwind CSS & Tokens  │
-      │  • Modular TSX Components  • Downloaded Assets in   │
-      │  • Multi-route Pages         public/                │
-      └──────────────────────────┬──────────────────────────┘
-                                 ▼
-                      Artifact Integrity Audit
-                 (Structural score & verify report)
-                                 ▼
-             Fully Runnable Next.js Application
+            ANY WEBSITE
+                        │
+                        ▼
+              ┌──────────────────┐
+              │ Browser Capture  │
+              └────────┬─────────┘
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+        DOM/CSS      Assets       Runtime
+          │            │            │
+          └────────────┼────────────┘
+                       ▼
+                BEHAVIOR ENGINE
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+       Layout       States        Motion
+          │            │            │
+          └────────────┼────────────┘
+                       ▼
+                    SITE IR
+                       │
+                       ▼
+                  GENERATORS
+                       │
+              ┌────────┴────────┐
+              ▼                 ▼
+           Static            Dynamic
+              │                 │
+              └────────┬────────┘
+                       ▼
+                  VERIFICATION
+                       │
+           ┌───────────┴───────────┐
+           ▼                       ▼
+       Pixel fidelity       Behavioral fidelity
 ```
+
+### Formula Breakdown
+
+1. **Browser Capture**:
+   - **DOM/CSS**: Multi-viewport DOM trees, computed styles, cascade rules, typography metrics, and bounding geometry.
+   - **Assets**: Images, vector SVGs, custom web fonts, video media, and canvas payloads.
+   - **Runtime**: Dynamic execution state, active DOM mutations, event listener bindings, and network interactions.
+2. **Behavior Engine**:
+   - **Layout**: Component hierarchy clustering, Flexbox/Grid flow, container queries, and responsive breakpoint constraints.
+   - **States**: Hover, focus, active states, disclosure mechanics (drawers, modals, accordions, tabs), and route transitions.
+   - **Motion**: CSS transitions, keyframes, scroll-driven triggers, parallax trajectories, and Framer Motion semantics.
+3. **Site IR (Intermediate Representation)**:
+   - The single source of truth and data contract decoupling extraction from code generation. Completely structured and schema-validated JSON.
+4. **Generators**:
+   - **Static**: Zero-dependency HTML, CSS design tokens, localized canonical assets, and responsive typography.
+   - **Dynamic**: React / Next.js (App Router), interactive TypeScript components, state stores, and animation runtimes.
+5. **Verification**:
+   - **Pixel Fidelity**: Multi-viewport visual screenshot diffing against ground truth (pixel-perfect match thresholding).
+   - **Behavioral Fidelity**: Automated testing of interactive state transitions, navigation, layout constraints, and motion playback.
 
 ---
 

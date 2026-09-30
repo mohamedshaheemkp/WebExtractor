@@ -207,12 +207,12 @@ export default nextConfig;
         ]
         layout_elements = [
             "        {children}",
-            f"        <MotionRuntime animations={{{json.dumps(animations)}}} />",
+            "        <MotionRuntime animations={ANIMATIONS} />",
         ]
 
         if interactions:
             layout_imports.append('import InteractionRuntime from "../components/InteractionRuntime";')
-            layout_elements.append(f"        <InteractionRuntime interactions={{{json.dumps(interactions)}}} />")
+            layout_elements.append("        <InteractionRuntime interactions={INTERACTIONS} />")
 
         if has_route_transitions:
             layout_imports.append('import RouteTransition from "../components/RouteTransition";')
@@ -224,12 +224,16 @@ export default nextConfig;
 
         imports_str = "\n".join(layout_imports)
         elements_str = "\n".join(layout_elements)
+        constants_str = f"const ANIMATIONS: any = {json.dumps(animations)};\n"
+        if interactions:
+            constants_str += f"const INTERACTIONS: any = {json.dumps(interactions)};\n"
 
         self._text(
             "app/layout.tsx",
             f"""\
 {imports_str}
 
+{constants_str}
 export const metadata = {{
   title: {json.dumps(title)},
 }};

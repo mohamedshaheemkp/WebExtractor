@@ -7,7 +7,11 @@ from pathlib import Path
 
 from webextractor.verification.report import VerificationReport
 from webextractor.verification.screenshots import ScreenshotComparator
-from webextractor.verification.visual_diff import VisualDiffScorer
+from webextractor.verification.visual_diff import (
+    ComponentDiffReportGenerator,
+    VisualDiffScorer,
+    generate_component_diff_report,
+)
 
 
 def create_mock_png(width: int, height: int, color_rgb: tuple[int, int, int] = (255, 0, 0)) -> bytes:
@@ -206,5 +210,77 @@ class TestValidationEngine(unittest.TestCase):
         self.assertIn("typography", data["categories"])
 
 
+    def test_component_region_diffing(self):
+        """Validates that ScreenshotComparator.compare_region diffs bounding boxes with threshold gating."""
+        img1 = self.path / "region_img1.png"
+        img2 = self.path / "region_img2.png"
+        img1.write_bytes(create_mock_png(100, 100, (50, 50, 50)))
+        img2.write_bytes(create_mock_png(100, 100, (50, 50, 50)))
+
+        # 1. Matching region
+        rect_hero = {"x": 0, "y": 0, "width": 100, "height": 50}
+        res_pass = ScreenshotComparator.compare_region(img1, img2, rect=rect_hero, threshold=5.0)
+        self.assertEqual(res_pass["status"], "PASS")
+        self.assertFalse(res_pass["flagged"])
+        self.assertEqual(res_pass["divergence_score"], 0.0)
+
+        # 2. Differing region above threshold
+        img3 = self.path / "region_img3.png"
+        img3.write_bytes(create_mock_png(100, 100, (200, 200, 200)))
+        res_fail = ScreenshotComparator.compare_region(img1, img3, rect=rect_hero, threshold=5.0)
+        self.assertEqual(res_fail["status"], "FAIL")
+        self.assertTrue(res_fail["flagged"])
+        self.assertGreater(res_fail["divergence_score"], 5.0)
+
+    def test_component_diff_report_generator(self):
+        """Validates that ComponentDiffReportGenerator produces per-component divergence list from DOM and screenshots."""
+        flat_shot = self.path / "flat_shot.png"
+        react_shot = self.path / "react_shot.png"
+        flat_shot.write_bytes(create_mock_png(100, 200, (30, 30, 30)))
+        react_shot.write_bytes(create_mock_png(100, 200, (30, 30, 30)))
+
+        mock_dom = {
+            "tag": "main",
+            "children": [
+                {
+                    "tag": "section",
+                    "attributes": {"data-component-name": "HeroSection"},
+                    "rect": {"x": 0, "y": 0, "width": 100, "height": 100},
+                },
+                {
+                    "tag": "footer",
+                    "attributes": {"id": "FooterNav"},
+                    "rect": {"x": 0, "y": 100, "width": 100, "height": 100},
+                },
+            ],
+        }
+
+        # DOM + screenshot pair
+        report = ComponentDiffReportGenerator.generate(
+            flat_export=(flat_shot, mock_dom),
+            react_output=react_shot,
+            threshold=5.0,
+            breakpoint=1440,
+        )
+
+        self.assertIsInstance(report, list)
+        self.assertEqual(len(report), 2)
+        self.assertEqual(report[0]["component"], "HeroSection")
+        self.assertEqual(report[0]["status"], "PASS")
+        self.assertFalse(report[0]["flagged"])
+        self.assertEqual(report[1]["component"], "FooterNav")
+        self.assertEqual(report[1]["status"], "PASS")
+        self.assertFalse(report.has_divergence)
+
+        # Scorer method delegation
+        scorer_report = VisualDiffScorer.generate_component_diff_report(
+            flat_export=(flat_shot, mock_dom),
+            react_output=react_shot,
+            threshold=5.0,
+        )
+        self.assertEqual(len(scorer_report), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
+

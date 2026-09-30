@@ -1,23 +1,70 @@
-Build a general website reconstruction engine that can inspect a website from 
-its captured evidence and recreate its structure, visuals, responsive behavior, routes, assets,
- interactions, animations, and media — regardless of whether the source came from Framer, Figma,
-  Squarespace, WordPress, or another web platform.
+# WebExtractor — Goal
 
+Build a general-purpose, evidence-driven website reconstruction engine that can inspect captured website evidence and recreate the site's structure, visuals, responsive behavior, routes, assets, interactions, animations, and media.
 
+The engine should work independently of the original website platform, including:
 
-                      WEBEXTRACTOR
-                         │
-        ┌────────────────┼────────────────┐
-        │                │                │
-     SOURCE          EVIDENCE          OUTPUT
-        │                │                │
- ┌──────┼──────┐   ┌─────┼─────┐    ┌─────┼─────┐
- │      │      │   │     │     │    │     │     │
-Framer Figma WordPress DOM  CSS  Motion Next  React
-Squarespace       Assets Media Routes Components
-                         │
-                         ▼
-                GENERIC SITE MODEL
-                         │
-                         ▼
-                  RECONSTRUCTION
+```text
+Framer
+Figma
+WordPress
+Squarespace
+Custom websites
+Other web platforms
+```
+
+The platform is the **source of evidence**, not the reconstruction model.
+
+```text
+                         WEBEXTRACTOR
+                              │
+             ┌────────────────┼────────────────┐
+             │                │                │
+           SOURCE           EVIDENCE          OUTPUT
+             │                │                │
+      ┌──────┼──────┐   ┌─────┼──────┐   ┌─────┼──────┐
+      │      │      │   │     │      │   │     │      │
+    Framer Figma WordPress DOM   CSS  Motion Next.js React
+   Squarespace Custom      Assets Media Routes Components
+                             │
+                             ▼
+                      GENERIC SITE MODEL
+                             │
+                             ▼
+                       RECONSTRUCTION
+                             │
+                             ▼
+                     VALIDATION & REPAIR
+```
+
+## Core Principle
+
+WebExtractor should reconstruct from **captured evidence**, not from assumptions about the source platform.
+
+```text
+Captured Evidence
+       ↓
+Generic Site Model
+       ↓
+Reconstruction
+       ↓
+Validation
+       ↓
+Repair
+```
+
+The generated result should preserve the observed:
+
+* structure
+* visuals
+* layout
+* typography
+* responsive behavior
+* routes
+* assets
+* media
+* interactions
+* animations
+* states
+
+The goal is a **platform-independent website reconstruction engine**, not a platform-specific exporter.

@@ -285,57 +285,108 @@ class StaticProjectGenerator:
         (self.output / "css" / "styles.css").write_text("\n".join(css_lines), encoding="utf-8")
 
     def _write_script(self) -> None:
-        js_content = """\
+        animations = self.ir.get("animations", {}) if isinstance(self.ir.get("animations"), dict) else {}
+        parallax_list = animations.get("parallax_elements", [])
+        parallax_json = json.dumps(parallax_list)
+
+        js_content = f"""\
 /**
  * WebExtractor — Static Interaction & Motion Runtime
  */
-(function () {
+(function () {{
   'use strict';
 
   // 1. Intersection Observer for Scroll Reveals
   const revealElements = document.querySelectorAll('.wx-reveal, [data-motion-id]');
-  if ('IntersectionObserver' in window && revealElements.length > 0) {
-    const observer = new IntersectionObserver((entries, obs) => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
+  if ('IntersectionObserver' in window && revealElements.length > 0) {{
+    const observer = new IntersectionObserver((entries, obs) => {{
+      entries.forEach(entry => {{
+        if (entry.isIntersecting) {{
           entry.target.classList.add('wx-revealed');
           obs.unobserve(entry.target);
-        }
-      });
-    }, { threshold: 0.1 });
+        }}
+      }});
+    }}, {{ threshold: 0.1 }});
 
     revealElements.forEach(el => observer.observe(el));
-  } else {
+  }} else {{
     revealElements.forEach(el => el.classList.add('wx-revealed'));
-  }
+  }}
 
   // 2. Mobile Menu Toggle Support
   const menuButtons = document.querySelectorAll('[aria-expanded], .menu-toggle, [data-menu-toggle]');
-  menuButtons.forEach(btn => {
-    btn.addEventListener('click', () => {
+  menuButtons.forEach(btn => {{
+    btn.addEventListener('click', () => {{
       const expanded = btn.getAttribute('aria-expanded') === 'true';
       btn.setAttribute('aria-expanded', String(!expanded));
       const targetId = btn.getAttribute('aria-controls') || btn.getAttribute('data-target');
-      if (targetId) {
+      if (targetId) {{
         const target = document.getElementById(targetId);
         if (target) target.classList.toggle('active');
-      }
-    });
-  });
+      }}
+    }});
+  }});
 
   // 3. Smooth Anchor Scrolling
-  document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-    anchor.addEventListener('click', function (e) {
+  document.querySelectorAll('a[href^="#"]').forEach(anchor => {{
+    anchor.addEventListener('click', function (e) {{
       const targetId = this.getAttribute('href').substring(1);
       if (!targetId) return;
       const target = document.getElementById(targetId);
-      if (target) {
+      if (target) {{
         e.preventDefault();
-        target.scrollIntoView({ behavior: 'smooth' });
-      }
-    });
-  });
-})();
+        target.scrollIntoView({{ behavior: 'smooth' }});
+      }}
+    }});
+  }});
+
+  // 4. Parallax / Scroll-Linked Elements
+  const parallaxList = {parallax_json};
+  const parallaxElements = [];
+  parallaxList.forEach((sel) => {{
+    try {{
+      document.querySelectorAll(sel).forEach((node) => {{
+        if (node instanceof HTMLElement && !parallaxElements.includes(node)) {{
+          parallaxElements.push(node);
+        }}
+      }});
+    }} catch (e) {{}}
+  }});
+  try {{
+    document.querySelectorAll("[data-parallax]").forEach((node) => {{
+      if (node instanceof HTMLElement && !parallaxElements.includes(node)) {{
+        parallaxElements.push(node);
+      }}
+    }});
+  }} catch (e) {{}}
+
+  if (parallaxElements.length > 0) {{
+    let ticking = false;
+    const onScroll = () => {{
+      if (!ticking) {{
+        window.requestAnimationFrame(() => {{
+          const vh = window.innerHeight;
+          parallaxElements.forEach((el) => {{
+            const container = el.parentElement || el;
+            const rect = container.getBoundingClientRect();
+            if (rect.bottom >= -100 && rect.top <= vh + 100) {{
+              const progress = (vh - rect.top) / (vh + rect.height);
+              const clamped = Math.max(0, Math.min(1, progress));
+              const speed = parseFloat(el.getAttribute("data-parallax-speed") || "100");
+              const offset = (clamped - 0.5) * speed;
+              el.style.transform = `translate3d(0, ${{Math.round(-offset)}}px, 0)`;
+            }} else if (window.scrollY === 0) {{
+              el.style.transform = "";
+            }}
+          }});
+          ticking = false;
+        }});
+        ticking = true;
+      }}
+    }};
+    window.addEventListener("scroll", onScroll, {{ passive: true }});
+  }}
+}})();
 """
         (self.output / "js" / "app.js").write_text(js_content, encoding="utf-8")
 
@@ -371,7 +422,9 @@ class StaticProjectGenerator:
             if k_low == "style":
                 has_style = True
                 v_str = self._resolve_asset_url(str(v))
-                attr_strs.append(f'style="{html.escape(v_str)}"')
+                v_clean = re.sub(r'(?:^|;\s*)transform:\s*(?:none|matrix\(1,\s*0,\s*0,\s*1,\s*0,\s*0\));?', '', v_str).strip(' ;')
+                if v_clean:
+                    attr_strs.append(f'style="{html.escape(v_clean)}"')
                 continue
             v_str = str(v)
             if k_low == "srcset":

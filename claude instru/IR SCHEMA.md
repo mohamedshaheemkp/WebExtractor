@@ -20,6 +20,50 @@ Stored as versioned JSON per site, checked into the repo under
 `test-runs/<site>/ir.json` (or a DB if this grows past flat-file scale —
 not needed yet).
 
+## Architectural Context — The WebExtractor Formula
+
+The Site IR sits at the exact center of the WebExtractor pipeline, bridging the evidence collected by Browser Capture and interpreted by the Behavior Engine to the Static and Dynamic Generators:
+
+```text
+            ANY WEBSITE
+                        │
+                        ▼
+              ┌──────────────────┐
+              │ Browser Capture  │
+              └────────┬─────────┘
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+        DOM/CSS      Assets       Runtime
+          │            │            │
+          └────────────┼────────────┘
+                       ▼
+                BEHAVIOR ENGINE
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+       Layout       States        Motion
+          │            │            │
+          └────────────┼────────────┘
+                       ▼
+                    SITE IR
+                       │
+                       ▼
+                  GENERATORS
+                       │
+              ┌────────┴────────┐
+              ▼                 ▼
+           Static            Dynamic
+              │                 │
+              └────────┬────────┘
+                       ▼
+                  VERIFICATION
+                       │
+           ┌───────────┴───────────┐
+           ▼                       ▼
+       Pixel fidelity       Behavioral fidelity
+```
+
 ## Top-level shape
 
 ```json

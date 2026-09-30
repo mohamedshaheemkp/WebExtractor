@@ -100,6 +100,13 @@ class BrowserCapture:
                     document.querySelectorAll('body *').forEach((el) => {
                         const tag = el.tagName;
                         if (['SCRIPT','STYLE','NOSCRIPT'].includes(tag)) return;
+                        // Elements already natively animated by Framer's own
+                        // appear-id system are handled by the Framer motion
+                        // adapter separately; scanning them here would bake a
+                        // second, independent data-motion-id onto the same
+                        // element, producing conflicting animation configs
+                        // (see analyzer.py's appear_animations merge).
+                        if (el.hasAttribute('data-framer-appear-id')) return;
                         const rect = el.getBoundingClientRect();
                         if (rect.width < 2 || rect.height < 2) return;
                         const cs = window.getComputedStyle(el);

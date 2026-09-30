@@ -7,6 +7,250 @@ from typing import Any
 from webextractor.verification.screenshots import ScreenshotComparator
 
 
+class ComponentDiffReport(list):
+    """
+    List of per-component region divergence records with threshold-gated status.
+    Inherits from list so it behaves directly as a list while exposing convenience properties.
+    """
+
+    def __init__(
+        self,
+        items: list[dict[str, Any]] | None = None,
+        threshold: float = 5.0,
+        breakpoint: int | str | None = None,
+    ):
+        super().__init__(items or [])
+        self.threshold = threshold
+        self.breakpoint = breakpoint
+
+    @property
+    def flagged(self) -> list[dict[str, Any]]:
+        """Returns all component regions where divergence exceeds the configured threshold."""
+        return [item for item in self if item.get("flagged")]
+
+    @property
+    def passed(self) -> list[dict[str, Any]]:
+        """Returns all component regions within the acceptable threshold."""
+        return [item for item in self if not item.get("flagged")]
+
+    @property
+    def has_divergence(self) -> bool:
+        """True if any component region has been flagged above threshold."""
+        return any(item.get("flagged") for item in self)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serializes the diff report into a machine-readable summary dict."""
+        return {
+            "status": "FAIL" if self.has_divergence else "PASS",
+            "threshold": self.threshold,
+            "breakpoint": self.breakpoint,
+            "total_regions": len(self),
+            "flagged_count": len(self.flagged),
+            "regions": list(self),
+        }
+
+
+class ComponentDiffReportGenerator:
+    """
+    Per-component visual diff report generator comparing current React-generated output
+    against Phase 0 flat export per Phase 1 exit criteria.
+    Extracts per-component bounding regions and performs threshold-gated pixel comparison.
+    """
+
+    @staticmethod
+    def _unpack_pair(
+        item: Path | str | dict[str, Any] | tuple[Any, Any] | list[Any] | None,
+    ) -> tuple[Path | str | None, dict[str, Any] | None]:
+        """Normalizes screenshot or DOM+screenshot pair input."""
+        if item is None:
+            return None, None
+        if isinstance(item, (str, Path)):
+            return item, None
+        if isinstance(item, (tuple, list)):
+            shot: Path | str | None = None
+            dom: dict[str, Any] | None = None
+            for elem in item:
+                if isinstance(elem, (str, Path)):
+                    shot = elem
+                elif isinstance(elem, dict):
+                    dom = elem
+            return shot, dom
+        if isinstance(item, dict):
+            shot = item.get("screenshot") or item.get("screenshot_path") or item.get("image") or item.get("path")
+            dom = item.get("dom") or item.get("rendered_dom") or item.get("dom_tree") or item.get("dom_snapshot")
+            if not shot and ("tag" in item or "children" in item):
+                dom = item
+            return shot, dom
+        return None, None
+
+    @classmethod
+    def extract_regions_from_dom(
+        cls,
+        dom_tree: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """
+        Extracts component bounding regions from a captured DOM tree.
+        Uses DomToJsxEmitter section decomposition and semantic container heuristics.
+        """
+        regions: list[dict[str, Any]] = []
+
+        # 1. Structural section decomposition
+        try:
+            from webextractor.generator.dom_emitter import DomToJsxEmitter
+            _, sections = DomToJsxEmitter.decompose_content_sections(dom_tree)
+            for sec in sections:
+                node = sec.get("node", {})
+                rect = node.get("rect") if isinstance(node, dict) else None
+                if rect and rect.get("width", 0) > 0 and rect.get("height", 0) > 0:
+                    regions.append({
+                        "name": sec.get("name", "Component"),
+                        "rect": {
+                            "x": int(rect.get("x", 0)),
+                            "y": int(rect.get("y", 0)),
+                            "width": int(rect.get("width", 0)),
+                            "height": int(rect.get("height", 0)),
+                        },
+                        "tag": sec.get("tag"),
+                    })
+        except Exception:
+            pass
+
+        if regions:
+            return regions
+
+        # 2. Recursive search for named or semantic component containers with positive rect
+        def search_nodes(node: dict[str, Any], depth: int = 0) -> None:
+            if not isinstance(node, dict) or depth > 12:
+                return
+            attrs = node.get("attributes", {}) if isinstance(node.get("attributes"), dict) else {}
+            name = (
+                attrs.get("data-component-name")
+                or attrs.get("data-framer-name")
+                or attrs.get("data-component")
+                or node.get("id")
+            )
+            tag = (node.get("tag") or "").lower()
+            rect = node.get("rect")
+
+            is_semantic = tag in ("section", "header", "footer", "nav", "main", "article")
+            if (name or is_semantic) and isinstance(rect, dict) and rect.get("width", 0) > 0 and rect.get("height", 0) > 0:
+                comp_name = str(name) if name else (tag.capitalize() if tag else "Component")
+                regions.append({
+                    "name": comp_name,
+                    "rect": {
+                        "x": int(rect.get("x", 0)),
+                        "y": int(rect.get("y", 0)),
+                        "width": int(rect.get("width", 0)),
+                        "height": int(rect.get("height", 0)),
+                    },
+                    "tag": tag,
+                })
+                return
+
+            for child in node.get("children", []):
+                if isinstance(child, dict):
+                    search_nodes(child, depth + 1)
+
+        search_nodes(dom_tree)
+        return regions
+
+    @classmethod
+    def generate(
+        cls,
+        flat_export: Path | str | dict[str, Any] | tuple[Any, Any] | list[Any],
+        react_output: Path | str | dict[str, Any] | tuple[Any, Any] | list[Any],
+        *,
+        components: list[dict[str, Any]] | None = None,
+        threshold: float = 5.0,
+        color_tolerance: int = 15,
+        breakpoint: int | str | None = None,
+    ) -> ComponentDiffReport:
+        """
+        Generates a per-component region visual diff report comparing Phase 0 flat export
+        against current React-generated output.
+        Returns a ComponentDiffReport list of per-component regions with individual divergence scores
+        gated against threshold.
+        """
+        orig_shot, orig_dom = cls._unpack_pair(flat_export)
+        gen_shot, gen_dom = cls._unpack_pair(react_output)
+
+        target_regions: list[dict[str, Any]] = []
+
+        if components:
+            for c in components:
+                name = c.get("name") or c.get("component") or c.get("id") or "Component"
+                rect = c.get("rect") or c.get("bounds") or c.get("bbox")
+                if rect and isinstance(rect, dict):
+                    target_regions.append({"name": str(name), "rect": rect})
+        elif orig_dom:
+            target_regions = cls.extract_regions_from_dom(orig_dom)
+        elif gen_dom:
+            target_regions = cls.extract_regions_from_dom(gen_dom)
+
+        # Fallback: if no component regions found, sample full page from image header
+        if not target_regions and orig_shot:
+            hdr = ScreenshotComparator.read_png_header(orig_shot)
+            if hdr:
+                target_regions.append({
+                    "name": "FullPage",
+                    "rect": {"x": 0, "y": 0, "width": hdr["width"], "height": hdr["height"]},
+                })
+
+        # Pre-decode PNGs once for efficiency across all component regions
+        orig_decoded = ScreenshotComparator.decode_png_pixels(orig_shot) if orig_shot else None
+        gen_decoded = ScreenshotComparator.decode_png_pixels(gen_shot) if gen_shot else None
+
+        records: list[dict[str, Any]] = []
+
+        for reg in target_regions:
+            name = reg.get("name", "Component")
+            rect = reg.get("rect", {})
+            diff_res = ScreenshotComparator.compare_region(
+                orig_decoded if orig_decoded else (orig_shot or ""),
+                gen_decoded if gen_decoded else (gen_shot or ""),
+                rect=rect,
+                color_tolerance=color_tolerance,
+                threshold=threshold,
+            )
+            item = {
+                "component": name,
+                "rect": rect,
+                "divergence_score": diff_res["divergence_score"],
+                "similarity_score": diff_res["similarity_score"],
+                "flagged": diff_res["flagged"],
+                "status": diff_res["status"],
+                "threshold": threshold,
+                "mse": diff_res.get("mse", 0.0),
+                "samples_compared": diff_res.get("samples_compared", 0),
+                "diff_pixels_count": diff_res.get("diff_pixels_count", 0),
+            }
+            if breakpoint is not None:
+                item["breakpoint"] = breakpoint
+            records.append(item)
+
+        return ComponentDiffReport(records, threshold=threshold, breakpoint=breakpoint)
+
+
+def generate_component_diff_report(
+    flat_export: Path | str | dict[str, Any] | tuple[Any, Any] | list[Any],
+    react_output: Path | str | dict[str, Any] | tuple[Any, Any] | list[Any],
+    *,
+    components: list[dict[str, Any]] | None = None,
+    threshold: float = 5.0,
+    color_tolerance: int = 15,
+    breakpoint: int | str | None = None,
+) -> ComponentDiffReport:
+    """Convenience function generating per-component region diff reports."""
+    return ComponentDiffReportGenerator.generate(
+        flat_export=flat_export,
+        react_output=react_output,
+        components=components,
+        threshold=threshold,
+        color_tolerance=color_tolerance,
+        breakpoint=breakpoint,
+    )
+
+
 class VisualDiffScorer:
     """
     Multi-Signal Fidelity and Visual Difference Analysis Engine.
@@ -17,7 +261,29 @@ class VisualDiffScorer:
     4. Design System & Typography Coverage
     5. Responsive Viewport Rule Preservation
     6. Behavioral Interaction & Animation Mapping
+    7. Per-Component Region Visual Diffing (Phase 1 Exit Criteria)
     """
+
+    @classmethod
+    def generate_component_diff_report(
+        cls,
+        flat_export: Path | str | dict[str, Any] | tuple[Any, Any] | list[Any],
+        react_output: Path | str | dict[str, Any] | tuple[Any, Any] | list[Any],
+        *,
+        components: list[dict[str, Any]] | None = None,
+        threshold: float = 5.0,
+        color_tolerance: int = 15,
+        breakpoint: int | str | None = None,
+    ) -> ComponentDiffReport:
+        """Generates per-component region visual diff report."""
+        return ComponentDiffReportGenerator.generate(
+            flat_export=flat_export,
+            react_output=react_output,
+            components=components,
+            threshold=threshold,
+            color_tolerance=color_tolerance,
+            breakpoint=breakpoint,
+        )
 
     @staticmethod
     def calculate_score(
@@ -268,6 +534,7 @@ class VisualDiffScorer:
                 if gen_file and Path(orig_file).exists() and Path(gen_file).exists():
                     comp_res = ScreenshotComparator.compare_screenshots(orig_file, gen_file)
                     comp_res["viewport"] = vp
+
                     visual_comps.append(comp_res)
 
             if visual_comps:

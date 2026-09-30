@@ -187,14 +187,25 @@ class FramerMotionAdapter(BaseMotionAdapter):
                     break
 
         # 4. Parallax elements
-        for el in soup.find_all(attrs={"data-framer-name": "Parallax Image"}):
-            appear_id = el.get("data-framer-appear-id")
-            if appear_id:
-                parallax_elements.append(f'[data-framer-appear-id="{appear_id}"]')
-            else:
-                classes = el.get("class", [])
-                if classes:
-                    parallax_elements.append("." + ".".join(classes[:2]))
+        for el in soup.find_all(True):
+            framer_name = el.get("data-framer-name")
+            style_str = el.get("style", "")
+            classes = el.get("class", [])
+            is_parallax = (
+                framer_name == "Parallax Image"
+                or (framer_name == "Fill Your Image Here" and "transform" in style_str and "will-change" in style_str)
+                or el.has_attr("data-parallax")
+            )
+            if is_parallax:
+                appear_id = el.get("data-framer-appear-id")
+                if appear_id:
+                    sel = f'[data-framer-appear-id="{appear_id}"]'
+                elif classes:
+                    sel = "." + ".".join(classes[:2]) if isinstance(classes, list) else f".{classes}"
+                else:
+                    sel = None
+                if sel and sel not in parallax_elements:
+                    parallax_elements.append(sel)
 
         return {
             "appear_animations": appear_animations,

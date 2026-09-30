@@ -105,6 +105,38 @@ class TestStaticGenerator(unittest.TestCase):
         # Validate app.js contents
         app_js = (self.out_path / "js" / "app.js").read_text(encoding="utf-8")
         self.assertIn("IntersectionObserver", app_js)
+        self.assertIn("Parallax", app_js)
+
+    def test_parallax_motion_and_clean_transform(self):
+        """Validates that parallax elements are wired into app.js and resting transform: none is stripped."""
+        custom_ir = dict(self.mock_ir)
+        custom_ir["animations"] = {"parallax_elements": [".framer-1f6tfe0"]}
+        custom_ir["pages"] = [
+            {
+                "route": "/",
+                "title": "Home",
+                "dom": {
+                    "tag": "div",
+                    "classes": ["framer-1f6tfe0"],
+                    "attributes": {
+                        "style": "will-change: transform; opacity: 1; transform: none;",
+                        "data-framer-name": "Fill Your Image Here",
+                    },
+                    "children": [],
+                },
+            }
+        ]
+
+        generator = StaticProjectGenerator(custom_ir, self.out_path)
+        generator.generate()
+
+        index_html = (self.out_path / "index.html").read_text(encoding="utf-8")
+        self.assertNotIn("transform: none", index_html)
+        self.assertIn("will-change: transform", index_html)
+
+        app_js = (self.out_path / "js" / "app.js").read_text(encoding="utf-8")
+        self.assertIn(".framer-1f6tfe0", app_js)
+        self.assertIn("data-parallax-speed", app_js)
 
 
 if __name__ == "__main__":

@@ -210,43 +210,17 @@ class ScreenshotComparator:
         gen_decoded = cls.decode_png_pixels(gen)
 
         if orig_decoded and gen_decoded:
-            w1, h1, b1 = orig_decoded
-            w2, h2, b2 = gen_decoded
-            min_w = min(w1, w2)
-            min_h = min(h1, h2)
+            buf_res = cls.compare_pixel_buffers(
+                orig_decoded,
+                gen_decoded,
+                color_tolerance=color_tolerance,
+                max_samples_axis=300,
+            )
+            pixel_sim = buf_res["pixel_similarity"]
+            mse = buf_res["mse"]
+            total_px = buf_res["samples_compared"]
 
-            bytes_per_px_1 = len(b1) // (w1 * h1) if (w1 * h1) > 0 else 4
-            bytes_per_px_2 = len(b2) // (w2 * h2) if (w2 * h2) > 0 else 4
-
-            # Sample grid for efficiency on very large screenshots
-            step_y = max(1, min_h // 300)
-            step_x = max(1, min_w // 300)
-
-            matching_px = 0
-            total_px = 0
-            squared_diff_sum = 0.0
-
-            for y in range(0, min_h, step_y):
-                row1_start = y * w1 * bytes_per_px_1
-                row2_start = y * w2 * bytes_per_px_2
-                for x in range(0, min_w, step_x):
-                    px1 = row1_start + x * bytes_per_px_1
-                    px2 = row2_start + x * bytes_per_px_2
-
-                    r1, g1, b1_val = b1[px1], b1[px1 + 1], b1[px1 + 2]
-                    r2, g2, b2_val = b2[px2], b2[px2 + 1], b2[px2 + 2]
-
-                    diff = math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1_val - b2_val) ** 2)
-                    squared_diff_sum += (r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1_val - b2_val) ** 2
-
-                    if diff <= color_tolerance:
-                        matching_px += 1
-                    total_px += 1
-
-            pixel_sim = (matching_px / total_px * 100.0) if total_px > 0 else 100.0
-            mse = squared_diff_sum / (total_px * 3) if total_px > 0 else 0.0
-
-            # Combined score: 65% pixel similarity on common area + 35% dimension similarity
+            # Combined score: 70% pixel similarity on common area + 30% dimension similarity
             overall_sim = round((pixel_sim * 0.70) + (dim_score * 0.30), 1)
             status = "PASS" if overall_sim >= 88.0 else ("WARN" if overall_sim >= 70.0 else "FAIL")
 
@@ -281,6 +255,156 @@ class ScreenshotComparator:
                 "original": str(orig),
                 "generated": str(gen),
             }
+
+    @classmethod
+    def compare_pixel_buffers(
+        cls,
+        decoded1: tuple[int, int, list[int]],
+        decoded2: tuple[int, int, list[int]],
+        rect: dict[str, int | float] | None = None,
+        color_tolerance: int = 15,
+        max_samples_axis: int = 300,
+    ) -> dict[str, Any]:
+        """
+        Compares two decoded pixel buffers within an optional bounding box region.
+        Reused by both full-page comparison and per-component region diffing.
+        """
+        w1, h1, b1 = decoded1
+        w2, h2, b2 = decoded2
+
+        min_w = min(w1, w2)
+        min_h = min(h1, h2)
+
+        if rect:
+            rx = max(0, int(rect.get("x", 0)))
+            ry = max(0, int(rect.get("y", 0)))
+            rw = int(rect.get("width", 0))
+            rh = int(rect.get("height", 0))
+            if rw <= 0:
+                rw = min_w - rx
+            if rh <= 0:
+                rh = min_h - ry
+            start_x = rx
+            start_y = ry
+            end_x = min(rx + rw, min_w)
+            end_y = min(ry + rh, min_h)
+        else:
+            start_x = 0
+            start_y = 0
+            end_x = min_w
+            end_y = min_h
+
+        if end_x <= start_x or end_y <= start_y:
+            return {
+                "similarity_score": 100.0,
+                "divergence_score": 0.0,
+                "pixel_similarity": 100.0,
+                "mse": 0.0,
+                "samples_compared": 0,
+                "diff_pixels_count": 0,
+                "out_of_bounds": True,
+            }
+
+        span_w = end_x - start_x
+        span_h = end_y - start_y
+
+        bytes_per_px_1 = len(b1) // (w1 * h1) if (w1 * h1) > 0 else 4
+        bytes_per_px_2 = len(b2) // (w2 * h2) if (w2 * h2) > 0 else 4
+
+        step_y = max(1, span_h // max_samples_axis)
+        step_x = max(1, span_w // max_samples_axis)
+
+        matching_px = 0
+        diff_px = 0
+        total_px = 0
+        squared_diff_sum = 0.0
+
+        for y in range(start_y, end_y, step_y):
+            row1_start = y * w1 * bytes_per_px_1
+            row2_start = y * w2 * bytes_per_px_2
+            for x in range(start_x, end_x, step_x):
+                px1 = row1_start + x * bytes_per_px_1
+                px2 = row2_start + x * bytes_per_px_2
+
+                r1, g1, b1_val = b1[px1], b1[px1 + 1], b1[px1 + 2]
+                r2, g2, b2_val = b2[px2], b2[px2 + 1], b2[px2 + 2]
+
+                diff = math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1_val - b2_val) ** 2)
+                squared_diff_sum += (r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1_val - b2_val) ** 2
+
+                if diff <= color_tolerance:
+                    matching_px += 1
+                else:
+                    diff_px += 1
+                total_px += 1
+
+        pixel_sim = (matching_px / total_px * 100.0) if total_px > 0 else 100.0
+        divergence = round(100.0 - pixel_sim, 2)
+        mse = squared_diff_sum / (total_px * 3) if total_px > 0 else 0.0
+
+        return {
+            "similarity_score": round(pixel_sim, 2),
+            "divergence_score": divergence,
+            "pixel_similarity": round(pixel_sim, 2),
+            "mse": round(mse, 2),
+            "samples_compared": total_px,
+            "diff_pixels_count": diff_px,
+            "out_of_bounds": False,
+        }
+
+    @classmethod
+    def compare_region(
+        cls,
+        original: Path | str | tuple[int, int, list[int]],
+        generated: Path | str | tuple[int, int, list[int]],
+        rect: dict[str, int | float],
+        color_tolerance: int = 15,
+        threshold: float = 5.0,
+    ) -> dict[str, Any]:
+        """
+        Compares a specific rectangular component region across two screenshots or pixel buffers.
+        Returns threshold-gated flagging and per-region divergence metrics.
+        """
+        orig_decoded = original if isinstance(original, tuple) else cls.decode_png_pixels(original)
+        gen_decoded = generated if isinstance(generated, tuple) else cls.decode_png_pixels(generated)
+
+        if not orig_decoded or not gen_decoded:
+            return {
+                "status": "FAIL",
+                "divergence_score": 100.0,
+                "similarity_score": 0.0,
+                "flagged": True,
+                "threshold": threshold,
+                "rect": rect,
+                "error": "Failed to decode PNG pixels for region comparison",
+                "samples_compared": 0,
+                "diff_pixels_count": 0,
+                "mse": 0.0,
+            }
+
+        res = cls.compare_pixel_buffers(
+            orig_decoded,
+            gen_decoded,
+            rect=rect,
+            color_tolerance=color_tolerance,
+            max_samples_axis=200,
+        )
+
+        divergence = res["divergence_score"]
+        flagged = divergence > threshold
+        status = "FAIL" if flagged else "PASS"
+
+        return {
+            "status": status,
+            "divergence_score": divergence,
+            "similarity_score": res["similarity_score"],
+            "flagged": flagged,
+            "threshold": threshold,
+            "rect": rect,
+            "mse": res["mse"],
+            "samples_compared": res["samples_compared"],
+            "diff_pixels_count": res["diff_pixels_count"],
+        }
 
 
 async def capture_generated_screenshots(

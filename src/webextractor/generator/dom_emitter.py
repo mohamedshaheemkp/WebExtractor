@@ -395,6 +395,12 @@ class DomToJsxEmitter:
             if "height" not in node_attrs:
                 node_attrs["height"] = "100%"
 
+        seen_attrs: set[str] = set()
+        if is_root and root_id:
+            seen_attrs.add("id")
+        if cls_attr:
+            seen_attrs.add("classname")
+
         other_attrs_list: list[str] = []
         style_jsx = ""
 
@@ -440,6 +446,10 @@ class DomToJsxEmitter:
             else:
                 clean_key = ak_lower.lstrip("_")
                 jsx_ak = f"data-{clean_key}"
+
+            if jsx_ak.lower() in seen_attrs:
+                continue
+            seen_attrs.add(jsx_ak.lower())
 
             clean_val = html.escape(av_str, quote=True)
             if jsx_ak == "tabIndex" or (jsx_ak in ("colSpan", "rowSpan", "maxLength", "minLength", "start", "rows", "cols") and av_str.lstrip("-").isdigit()):

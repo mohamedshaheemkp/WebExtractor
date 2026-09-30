@@ -1,0 +1,74 @@
+--- a/src/webextractor/analysis/animations.py
++++ b/src/webextractor/analysis/animations.py
+@@ -21,6 +21,62 @@
+         else:
+             self.adapters = adapters
+ 
++    @staticmethod
++    def _merge_motion_triggers(
++        existing: list[dict[str, Any]],
++        incoming: list[dict[str, Any]],
++    ) -> None:
++        """
++        Merges a newly-extracted adapter's motion_triggers into the running
++        merged list in place, reconciling rather than duplicating when a
++        trigger targets the same element as one already present.
++
++        Without this, running FramerMotionAdapter and StandardCssMotionAdapter
++        over the same Framer site (StandardCssMotionAdapter.can_handle is
++        unconditional, so this always happens) produced two separate trigger
++        entries for the same element -- one keyed off
++        [data-framer-appear-id="..."], one off a class/tag selector -- both of
++        which the generator then bound to the element, causing duplicate or
++        conflicting motion behavior on output. Mirrors the match-by-id/target
++        reconciliation analyzer.py's _extract_dom_transitions already applies
++        (see analyzer.py:552-569), applied here at the earlier adapter-merge
++        point instead of per-node later on.
++        """
++        for new_trg in incoming:
++            new_target = new_trg.get("target", "")
++            new_id = new_trg.get("id")
++
++            match = None
++            for existing_trg in existing:
++                ex_target = existing_trg.get("target", "")
++                ex_id = existing_trg.get("id")
++                same = (
++                    (new_id and new_id == ex_id)
++                    or (new_target and new_target == ex_target)
++                    or (new_id and new_target and (new_id in ex_target or ex_id and ex_id in new_target))
++                )
++                if same:
++                    match = existing_trg
++                    break
++
++            if match is None:
++                existing.append(new_trg)
++                continue
++
++            # Reconcile: keep the existing entry, fill in whatever it's
++            # missing from the new one rather than appending a second trigger
++            # for the same element. Existing transition fields win so the
++            # first adapter to have detected this element (adapters run in
++            # self.adapters order, source-specific before generic) stays
++            # authoritative for any field both sides set.
++            for key, value in new_trg.items():
++                if key == "transition":
++                    match.setdefault("transition", {})
++                    for t_key, t_val in (value or {}).items():
++                        match["transition"].setdefault(t_key, t_val)
++                else:
++                    match.setdefault(key, value)
++
+     def analyze_motion(
+         self,
+         html_content: str,
+@@ -52,7 +108,7 @@
+                 if res.get("has_time_component"):
+                     merged["has_time_component"] = True
+                 merged["parallax_elements"].extend(res.get("parallax_elements", []))
+-                merged["motion_triggers"].extend(res.get("motion_triggers", []))
++                self._merge_motion_triggers(merged["motion_triggers"], res.get("motion_triggers", []))
+                 if res.get("default_transition_duration"):
+                     merged["default_transition_duration"] = res["default_transition_duration"]
+                 tf_val = res.get("default_timing_function") or res.get("default_easing") or res.get("timing_function")
