@@ -1165,7 +1165,7 @@ export default function MotionRuntime({
             easing: easing,
             fill: "both",
             iterations: isContinuous ? Infinity : 1,
-            direction: isContinuous ? "alternate" : "normal",
+            direction: isContinuous ? (config.direction || "normal") : "normal",
           });
           return anim;
         } catch (err) {
@@ -1342,6 +1342,74 @@ export default function MotionRuntime({
       };
       tab.addEventListener("click", onTabClick);
       cleanupFns.push(() => tab.removeEventListener("click", onTabClick));
+    });
+
+    // 4. Generic Continuous Horizontal Motion / Marquee Runtime
+    const marqueeCandidates = document.querySelectorAll(
+      '[data-continuous-motion="horizontal"], [data-continuous-motion="true"], .wx-marquee, ul, div'
+    );
+    marqueeCandidates.forEach((track) => {
+      if (!(track instanceof HTMLElement)) return;
+      const parent = track.parentElement;
+      if (!parent) return;
+      const parentStyle = window.getComputedStyle(parent);
+      const isClipped =
+        parentStyle.overflow === "hidden" ||
+        parentStyle.overflowX === "hidden" ||
+        Boolean(parentStyle.maskImage && parentStyle.maskImage !== "none");
+      if (!isClipped) return;
+
+      const trackStyle = window.getComputedStyle(track);
+      if (!trackStyle.display.includes("flex")) return;
+      if (trackStyle.flexDirection && trackStyle.flexDirection !== "row") return;
+
+      const scrollW = track.scrollWidth;
+      const clientW = parent.clientWidth;
+      if (scrollW <= clientW + 20) return;
+
+      if (trackStyle.animationName && trackStyle.animationName !== "none") return;
+
+      const travelDistance = Math.round(scrollW / 2);
+      if (travelDistance <= 0) return;
+
+      const velocity = 50;
+      const durationMs = Math.round((travelDistance / velocity) * 1000);
+
+      try {
+        const anim = track.animate(
+          [
+            { transform: "translateX(0px)" },
+            { transform: `translateX(-${travelDistance}px)` },
+          ],
+          {
+            duration: durationMs,
+            iterations: Infinity,
+            easing: "linear",
+          }
+        );
+
+        if (typeof IntersectionObserver !== "undefined") {
+          const obs = new IntersectionObserver(
+            (entries) => {
+              entries.forEach((entry) => {
+                if (entry.isIntersecting) {
+                  anim.play();
+                } else {
+                  anim.pause();
+                }
+              });
+            },
+            { threshold: 0.05 }
+          );
+          obs.observe(parent);
+          cleanupFns.push(() => {
+            obs.disconnect();
+            anim.cancel();
+          });
+        } else {
+          cleanupFns.push(() => anim.cancel());
+        }
+      } catch (e) {}
     });
 
     return () => {

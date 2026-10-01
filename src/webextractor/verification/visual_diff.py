@@ -222,8 +222,12 @@ class ComponentDiffReportGenerator:
                 "threshold": threshold,
                 "mse": diff_res.get("mse", 0.0),
                 "samples_compared": diff_res.get("samples_compared", 0),
-                "diff_pixels_count": diff_res.get("diff_pixels_count", 0),
             }
+            if diff_res.get("phase_difference_detected"):
+                item["phase_difference_detected"] = True
+                item["phase_offset_px"] = diff_res.get("phase_offset_px", 0)
+                item["phase_aligned_divergence"] = diff_res.get("phase_aligned_divergence")
+                item["phase_aligned_similarity"] = diff_res.get("phase_aligned_similarity")
             if breakpoint is not None:
                 item["breakpoint"] = breakpoint
             records.append(item)

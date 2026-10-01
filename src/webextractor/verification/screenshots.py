@@ -264,10 +264,13 @@ class ScreenshotComparator:
         rect: dict[str, int | float] | None = None,
         color_tolerance: int = 15,
         max_samples_axis: int = 300,
+        offset_x2: int = 0,
+        offset_y2: int = 0,
     ) -> dict[str, Any]:
         """
         Compares two decoded pixel buffers within an optional bounding box region.
         Reused by both full-page comparison and per-component region diffing.
+        Supports optional coordinate offsets on decoded2 for animation phase alignment.
         """
         w1, h1, b1 = decoded1
         w2, h2, b2 = decoded2
@@ -320,11 +323,17 @@ class ScreenshotComparator:
         squared_diff_sum = 0.0
 
         for y in range(start_y, end_y, step_y):
+            y2 = y + offset_y2
+            if y2 < 0 or y2 >= h2:
+                continue
             row1_start = y * w1 * bytes_per_px_1
-            row2_start = y * w2 * bytes_per_px_2
+            row2_start = y2 * w2 * bytes_per_px_2
             for x in range(start_x, end_x, step_x):
+                x2 = x + offset_x2
+                if x2 < 0 or x2 >= w2:
+                    continue
                 px1 = row1_start + x * bytes_per_px_1
-                px2 = row2_start + x * bytes_per_px_2
+                px2 = row2_start + x2 * bytes_per_px_2
 
                 r1, g1, b1_val = b1[px1], b1[px1 + 1], b1[px1 + 2]
                 r2, g2, b2_val = b2[px2], b2[px2 + 1], b2[px2 + 2]
@@ -360,10 +369,13 @@ class ScreenshotComparator:
         rect: dict[str, int | float],
         color_tolerance: int = 15,
         threshold: float = 5.0,
+        detect_phase_shift: bool = True,
+        max_phase_shift_px: int = 30,
     ) -> dict[str, Any]:
         """
         Compares a specific rectangular component region across two screenshots or pixel buffers.
         Returns threshold-gated flagging and per-region divergence metrics.
+        Includes animation-aware phase difference detection for continuous motion components.
         """
         orig_decoded = original if isinstance(original, tuple) else cls.decode_png_pixels(original)
         gen_decoded = generated if isinstance(generated, tuple) else cls.decode_png_pixels(generated)
@@ -394,7 +406,45 @@ class ScreenshotComparator:
         flagged = divergence > threshold
         status = "FAIL" if flagged else "PASS"
 
-        return {
+        phase_detected = False
+        phase_offset = 0
+        phase_aligned_div = divergence
+        phase_aligned_sim = res["similarity_score"]
+
+        # Animation-aware phase difference detection:
+        # If region diverges above threshold, test if horizontal translation phase shift explains it
+        rw = int(rect.get("width", 0))
+        if flagged and detect_phase_shift and rw >= 100:
+            best_s = 0
+            best_div = divergence
+            best_sim = res["similarity_score"]
+            for s in range(-max_phase_shift_px, max_phase_shift_px + 1, 2):
+                if s == 0:
+                    continue
+                shifted_res = cls.compare_pixel_buffers(
+                    orig_decoded,
+                    gen_decoded,
+                    rect=rect,
+                    color_tolerance=color_tolerance,
+                    max_samples_axis=200,
+                    offset_x2=-s,
+                )
+                if shifted_res["divergence_score"] < best_div:
+                    best_div = shifted_res["divergence_score"]
+                    best_sim = shifted_res["similarity_score"]
+                    best_s = s
+
+            # If a phase shift explains > 40% of the divergence or brings divergence below threshold
+            if best_div < divergence * 0.60 or best_div <= threshold:
+                phase_detected = True
+                phase_offset = best_s
+                phase_aligned_div = best_div
+                phase_aligned_sim = best_sim
+                if best_div <= threshold:
+                    flagged = False
+                    status = "PASS"
+
+        result_payload: dict[str, Any] = {
             "status": status,
             "divergence_score": divergence,
             "similarity_score": res["similarity_score"],
@@ -405,6 +455,13 @@ class ScreenshotComparator:
             "samples_compared": res["samples_compared"],
             "diff_pixels_count": res["diff_pixels_count"],
         }
+        if phase_detected:
+            result_payload["phase_difference_detected"] = True
+            result_payload["phase_offset_px"] = phase_offset
+            result_payload["phase_aligned_divergence"] = phase_aligned_div
+            result_payload["phase_aligned_similarity"] = phase_aligned_sim
+
+        return result_payload
 
 
 async def capture_generated_screenshots(

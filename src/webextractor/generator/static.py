@@ -386,6 +386,68 @@ class StaticProjectGenerator:
     }};
     window.addEventListener("scroll", onScroll, {{ passive: true }});
   }}
+
+  // 5. Continuous Horizontal Motion / Marquee Runtime
+  const marqueeCandidates = document.querySelectorAll(
+    '[data-continuous-motion="horizontal"], [data-continuous-motion="true"], .wx-marquee, ul, div'
+  );
+  marqueeCandidates.forEach((track) => {{
+    if (!(track instanceof HTMLElement)) return;
+    const parent = track.parentElement;
+    if (!parent) return;
+    const parentStyle = window.getComputedStyle(parent);
+    const isClipped =
+      parentStyle.overflow === 'hidden' ||
+      parentStyle.overflowX === 'hidden' ||
+      Boolean(parentStyle.maskImage && parentStyle.maskImage !== 'none');
+    if (!isClipped) return;
+
+    const trackStyle = window.getComputedStyle(track);
+    if (!trackStyle.display.includes('flex')) return;
+    if (trackStyle.flexDirection && trackStyle.flexDirection !== 'row') return;
+
+    const scrollW = track.scrollWidth;
+    const clientW = parent.clientWidth;
+    if (scrollW <= clientW + 20) return;
+
+    if (trackStyle.animationName && trackStyle.animationName !== 'none') return;
+
+    const travelDistance = Math.round(scrollW / 2);
+    if (travelDistance <= 0) return;
+
+    const velocity = 50;
+    const durationMs = Math.round((travelDistance / velocity) * 1000);
+
+    try {{
+      const anim = track.animate(
+        [
+          {{ transform: 'translateX(0px)' }},
+          {{ transform: `translateX(-${{travelDistance}}px)` }}
+        ],
+        {{
+          duration: durationMs,
+          iterations: Infinity,
+          easing: 'linear'
+        }}
+      );
+
+      if ('IntersectionObserver' in window) {{
+        const obs = new IntersectionObserver(
+          (entries) => {{
+            entries.forEach((entry) => {{
+              if (entry.isIntersecting) {{
+                anim.play();
+              }} else {{
+                anim.pause();
+              }}
+            }});
+          }},
+          {{ threshold: 0.05 }}
+        );
+        obs.observe(parent);
+      }}
+    }} catch (e) {{}}
+  }});
 }})();
 """
         (self.output / "js" / "app.js").write_text(js_content, encoding="utf-8")

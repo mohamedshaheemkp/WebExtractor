@@ -138,6 +138,17 @@ class TestStaticGenerator(unittest.TestCase):
         self.assertIn(".framer-1f6tfe0", app_js)
         self.assertIn("data-parallax-speed", app_js)
 
+    def test_continuous_marquee_motion_script_emission(self):
+        """Validates that generic continuous horizontal motion / marquee runtime is emitted in app.js."""
+        generator = StaticProjectGenerator(self.mock_ir, self.out_path)
+        generator.generate()
+
+        app_js = (self.out_path / "js" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("Continuous Horizontal Motion / Marquee Runtime", app_js)
+        self.assertIn("data-continuous-motion", app_js)
+        self.assertIn("track.animate", app_js)
+        self.assertIn("translateX", app_js)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -280,6 +280,84 @@ class TestValidationEngine(unittest.TestCase):
         )
         self.assertEqual(len(scorer_report), 2)
 
+    def test_continuous_animation_phase_difference_detection(self):
+        """
+        Validates that continuous motion phase offsets (e.g. marquee displaced horizontally by 10px)
+        are detected as phase difference and pass without masking the raw divergence score.
+        """
+        w, h = 200, 50
+        # Buffer 1: background black, white bar at x in [40..70]
+        buf1_pixels = []
+        for y in range(h):
+            for x in range(w):
+                if 40 <= x < 70:
+                    buf1_pixels.extend([255, 255, 255])
+                else:
+                    buf1_pixels.extend([0, 0, 0])
+
+        # Buffer 2: same bar, phase-shifted by 10px to x in [50..80]
+        buf2_pixels = []
+        for y in range(h):
+            for x in range(w):
+                if 50 <= x < 80:
+                    buf2_pixels.extend([255, 255, 255])
+                else:
+                    buf2_pixels.extend([0, 0, 0])
+
+        rect = {"x": 0, "y": 0, "width": w, "height": h}
+
+        # Without phase detection: unaligned divergence should exceed threshold (10px * 50 = 500 diff pixels out of 10000 = 10%)
+        unaligned = ScreenshotComparator.compare_region(
+            (w, h, buf1_pixels),
+            (w, h, buf2_pixels),
+            rect=rect,
+            threshold=5.0,
+            detect_phase_shift=False,
+        )
+        self.assertTrue(unaligned["flagged"])
+        self.assertEqual(unaligned["status"], "FAIL")
+        self.assertGreater(unaligned["divergence_score"], 5.0)
+
+        # With phase detection: detects offset of +10px, aligns, and passes
+        aligned = ScreenshotComparator.compare_region(
+            (w, h, buf1_pixels),
+            (w, h, buf2_pixels),
+            rect=rect,
+            threshold=5.0,
+            detect_phase_shift=True,
+            max_phase_shift_px=20,
+        )
+        self.assertTrue(aligned.get("phase_difference_detected"))
+        self.assertEqual(aligned.get("phase_offset_px"), -10)
+        self.assertLessEqual(aligned.get("phase_aligned_divergence", 100), 5.0)
+        self.assertEqual(aligned["status"], "PASS")
+        self.assertFalse(aligned["flagged"])
+        # Crucial: raw divergence is preserved for reporting
+        self.assertGreater(aligned["divergence_score"], 5.0)
+
+    def test_reconstruction_failure_not_masked_by_phase_shift(self):
+        """
+        Validates that genuine reconstruction failure (completely different content or broken assets)
+        is NOT masked as a phase difference and correctly fails.
+        """
+        w, h = 200, 50
+        buf1_pixels = [255, 0, 0] * (w * h)  # All red
+        buf2_pixels = [0, 255, 0] * (w * h)  # All green
+
+        rect = {"x": 0, "y": 0, "width": w, "height": h}
+
+        res = ScreenshotComparator.compare_region(
+            (w, h, buf1_pixels),
+            (w, h, buf2_pixels),
+            rect=rect,
+            threshold=5.0,
+            detect_phase_shift=True,
+            max_phase_shift_px=20,
+        )
+        self.assertTrue(res["flagged"])
+        self.assertEqual(res["status"], "FAIL")
+        self.assertFalse(res.get("phase_difference_detected", False))
+
 
 if __name__ == "__main__":
     unittest.main()
