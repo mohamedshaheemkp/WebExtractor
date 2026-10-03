@@ -74,12 +74,12 @@ async def execute_rip(
     if is_url:
         console.print("[bold cyan][1/6] Launching browser & capturing site[/bold cyan]")
         try:
-            crawler = WebsiteCrawler(dest_dir / "capture", viewports=custom_viewports)
+            crawler = WebsiteCrawler(dest_dir / "capture", max_routes=50, max_depth=3, viewports=custom_viewports)
             capture = await crawler.crawl(target)
             console.print("      [green]✓[/green] Browser snapshot captured")
 
             html_content = capture.get("html", "")
-            routes = RouteAnalyzer.analyze_routes(html_content, target)
+            routes = RouteAnalyzer.analyze_routes(html_content, target, extra_routes=capture.get("routes", []))
             console.print(f"      [green]✓[/green] {len(routes)} routes discovered")
             console.print(f"      [green]✓[/green] {len(capture.get('requests', []))} network requests recorded")
             failed_routes = capture.get("failed_routes", [])
@@ -189,6 +189,7 @@ async def execute_rip(
         raw_tokens=site_model.tokens,
         animations=getattr(site_model, "animations", {}),
         interactions=getattr(site_model, "interactions", []),
+        overlay=getattr(site_model, "overlay", None),
     )
 
     site_ir.save(dest_dir / "analysis")

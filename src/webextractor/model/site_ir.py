@@ -30,6 +30,7 @@ class SiteIR:
     screenshot_paths: dict[str, str] = field(default_factory=dict)
     animations: dict[str, Any] = field(default_factory=dict)
     interactions: list[dict[str, Any]] = field(default_factory=list)
+    overlay: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

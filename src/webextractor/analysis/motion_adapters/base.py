@@ -17,7 +17,9 @@ class BaseMotionAdapter(ABC):
         pass
 
     @abstractmethod
-    def extract_motion(self, html: str, css: str = "") -> dict[str, Any]:
+    def extract_motion(
+        self, html: str, css: str = "", claimed_targets: set[str] | None = None
+    ) -> dict[str, Any]:
         """
         Extract motion configurations and return a dictionary conforming to the normalized schema:
         {
@@ -30,3 +32,4 @@ class BaseMotionAdapter(ABC):
         }
         """
         pass
+

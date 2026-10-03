@@ -59,8 +59,15 @@ class RouteAnalyzer:
         return sorted(routes)
 
     @classmethod
-    def analyze_routes(cls, html: str, base_url: str):
+    def analyze_routes(cls, html: str, base_url: str, extra_routes: list[str] | None = None):
         routes_list = cls().analyze(html, base_url)
+        if extra_routes:
+            for er in extra_routes:
+                if er and isinstance(er, str):
+                    p = er if er.startswith("/") else f"/{er}"
+                    if p not in routes_list:
+                        routes_list.append(p)
+            routes_list = sorted(set(routes_list))
         from webextractor.model.route import Route
         return [Route(path=r, url=f"{base_url.rstrip('/')}{r}" if r.startswith('/') else f"{base_url}/{r}", name="Home" if r in ("/", "") else r.strip("/").capitalize()) for r in routes_list]
 

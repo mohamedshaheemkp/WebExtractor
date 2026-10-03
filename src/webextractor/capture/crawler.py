@@ -31,8 +31,8 @@ class WebsiteCrawler:
     def __init__(
         self,
         output_dir: str | Path,
-        max_routes: int = 10,
-        max_depth: int = 2,
+        max_routes: int = 50,
+        max_depth: int = 3,
         same_origin: bool = True,
         include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
@@ -203,6 +203,9 @@ class WebsiteCrawler:
             primary_capture["reveal_candidates"] = [
                 rc for cp in captured_pages for rc in cp.get("reveal_candidates", [])
             ]
+            primary_capture["overlay"] = primary_capture.get("overlay") or next(
+                (cp["overlay"] for cp in captured_pages if cp.get("overlay")), None
+            )
 
             writer = SnapshotWriter(
                 self.output_dir,

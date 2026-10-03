@@ -110,6 +110,8 @@ class SiteAnalyzer:
             asset_manifest=manifest,
             page_components=page_components,
             reusable_components=reusable_components,
+            pages=capture.get("pages", []),
+            overlay=capture.get("overlay"),
         )
 
         # 5. Extract Typography System
@@ -399,6 +401,7 @@ class SiteAnalyzer:
         setattr(site_model, "viewports", capture.get("viewports", {}))
         setattr(site_model, "animations", animations)
         setattr(site_model, "interactions", interactions)
+        setattr(site_model, "overlay", capture.get("overlay"))
 
         return site_model
 
@@ -529,7 +532,7 @@ class SiteAnalyzer:
                         appear[cid]["transition"]["timing_function"] = resolved_tf
                         appear[cid]["transition"]["easing"] = resolved_tf
                         appear[cid]["transition"]["ease"] = resolved_tf
-                    if dur_val is not None:
+                    if dur_val is not None and dur_val > 0:
                         appear[cid]["transition"]["duration"] = round(dur_val, 2)
 
             if framer_appear_id and framer_appear_id not in appear:
@@ -565,10 +568,15 @@ class SiteAnalyzer:
                         trg["transition"]["timing_function"] = resolved_tf
                         trg["transition"]["easing"] = resolved_tf
                         trg["transition"]["ease"] = resolved_tf
-                    if dur_val is not None:
+                    if dur_val is not None and dur_val > 0:
                         trg["transition"]["duration"] = round(dur_val, 2)
 
-            if not trigger_updated and (framer_appear_id or motion_id):
+            # Do not append appear animations to motion_triggers if they already exist in appear_animations
+            already_in_appear = (
+                (framer_appear_id and framer_appear_id in appear)
+                or (motion_id and motion_id in appear)
+            )
+            if not trigger_updated and not already_in_appear and (framer_appear_id or motion_id):
                 target = (
                     f'[data-framer-appear-id="{framer_appear_id}"]'
                     if framer_appear_id
@@ -578,10 +586,11 @@ class SiteAnalyzer:
                     "trigger": "mount" if framer_appear_id else "in_view",
                     "target": target,
                     "id": framer_appear_id or motion_id,
+                    "adapter": "analyzer",
                     "initial": {"opacity": 0, "y": 20},
                     "animate": {"opacity": 1, "y": 0},
                     "transition": {
-                        "duration": round(resolved_dur, 2),
+                        "duration": round(resolved_dur, 2) if resolved_dur > 0 else 0.6,
                         "type": "tween",
                         "timing_function": resolved_tf,
                         "easing": resolved_tf,

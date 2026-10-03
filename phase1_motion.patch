@@ -1,0 +1,249 @@
+diff --git a/src/webextractor/analysis/animations.py b/src/webextractor/analysis/animations.py
+index 8285185..eca7741 100644
+--- a/src/webextractor/analysis/animations.py
++++ b/src/webextractor/analysis/animations.py
+@@ -21,6 +21,76 @@ class AnimationExtractor:
+         else:
+             self.adapters = adapters
+ 
++    @staticmethod
++    def _targets_overlap(t1_target: str, t1_id: str | None, t2_target: str, t2_id: str | None) -> bool:
++        """Return True if two triggers target the same DOM element."""
++        if t1_id and t2_id and t1_id == t2_id:
++            return True
++        if t1_target and t2_target and t1_target == t2_target:
++            return True
++        if t1_id and t2_target and (t1_id == t2_target or f'"{t1_id}"' in t2_target or f"'{t1_id}'" in t2_target or t1_id in t2_target):
++            return True
++        if t2_id and t1_target and (t2_id == t1_target or f'"{t2_id}"' in t1_target or f"'{t2_id}'" in t1_target or t2_id in t1_target):
++            return True
++        return False
++
++    @staticmethod
++    def _extract_property_set(trigger: dict[str, Any]) -> set[str]:
++        """Extract the set of animated properties for this trigger."""
++        props = set()
++        initial = trigger.get("initial", {}) or {}
++        animate = trigger.get("animate", {}) or {}
++        props.update(initial.keys())
++        props.update(animate.keys())
++        if trigger.get("effect"):
++            props.add(trigger["effect"])
++        if not props:
++            props.update(["opacity", "transform"])
++        return props
++
++    @classmethod
++    def reconcile_motion_triggers(
++        cls,
++        existing: list[dict[str, Any]],
++        incoming: list[dict[str, Any]],
++        adapter_name: str = "",
++    ) -> None:
++        """
++        Reconcile motion_triggers so there is at most one trigger per (target, property-set).
++        Records the winning adapter.
++        """
++        for new_trg in incoming:
++            if adapter_name and not new_trg.get("adapter"):
++                new_trg["adapter"] = adapter_name
++
++            new_target = new_trg.get("target", "")
++            new_id = new_trg.get("id")
++            new_props = cls._extract_property_set(new_trg)
++
++            match = None
++            for ex_trg in existing:
++                ex_target = ex_trg.get("target", "")
++                ex_id = ex_trg.get("id")
++                if cls._targets_overlap(new_target, new_id, ex_target, ex_id):
++                    ex_props = cls._extract_property_set(ex_trg)
++                    if not new_props or not ex_props or bool(new_props & ex_props):
++                        match = ex_trg
++                        break
++
++            if match is None:
++                existing.append(new_trg)
++            else:
++                # Existing trigger from earlier higher-priority adapter wins
++                if not match.get("adapter"):
++                    match["adapter"] = match.get("source") or "framer"
++                for k, v in new_trg.items():
++                    if k == "transition":
++                        match.setdefault("transition", {})
++                        for tk, tv in (v or {}).items():
++                            match["transition"].setdefault(tk, tv)
++                    elif k not in match:
++                        match[k] = v
++
+     def analyze_motion(
+         self,
+         html_content: str,
+@@ -40,19 +110,48 @@ class AnimationExtractor:
+             "timing_function": None,
+         }
+ 
++        claimed_targets: set[str] = set()
++
+         for adapter in self.adapters:
+             if adapter.can_handle(html_content, css_content):
+-                res = adapter.extract_motion(html_content, css_content)
++                adapter_name = "framer" if "framer" in adapter.__class__.__name__.lower() else (
++                    "standard" if "standard" in adapter.__class__.__name__.lower() else adapter.__class__.__name__.lower()
++                )
++                res = adapter.extract_motion(html_content, css_content, claimed_targets=claimed_targets)
++
++                # Track claimed targets from this adapter
++                for app_id in res.get("appear_animations", {}):
++                    claimed_targets.add(app_id)
++                for trg in res.get("motion_triggers", []):
++                    if trg.get("id"):
++                        claimed_targets.add(trg["id"])
++                    if trg.get("target"):
++                        claimed_targets.add(trg["target"])
++                for sel in res.get("parallax_elements", []):
++                    claimed_targets.add(sel)
++
+                 merged["appear_animations"].update(res.get("appear_animations", {}))
+                 if res.get("element_transitions"):
+-                    merged["element_transitions"].update(res["element_transitions"])
++                    for sel, t_data in res["element_transitions"].items():
++                        if not any(ct in sel for ct in claimed_targets):
++                            merged["element_transitions"].setdefault(sel, t_data)
++                        elif sel not in merged["element_transitions"]:
++                            merged["element_transitions"][sel] = t_data
++
+                 merged["keyframes"].extend(res.get("keyframes", []))
+                 if res.get("has_cursor"):
+                     merged["has_cursor"] = True
+                 if res.get("has_time_component"):
+                     merged["has_time_component"] = True
+                 merged["parallax_elements"].extend(res.get("parallax_elements", []))
+-                merged["motion_triggers"].extend(res.get("motion_triggers", []))
++
++                # Reconcile motion triggers ensuring at most one per (target, property-set)
++                self.reconcile_motion_triggers(
++                    merged["motion_triggers"],
++                    res.get("motion_triggers", []),
++                    adapter_name=adapter_name,
++                )
++
+                 if res.get("default_transition_duration"):
+                     merged["default_transition_duration"] = res["default_transition_duration"]
+                 tf_val = res.get("default_timing_function") or res.get("default_easing") or res.get("timing_function")
+diff --git a/src/webextractor/analysis/motion_adapters/base.py b/src/webextractor/analysis/motion_adapters/base.py
+index 5bf8768..06c6cd2 100644
+--- a/src/webextractor/analysis/motion_adapters/base.py
++++ b/src/webextractor/analysis/motion_adapters/base.py
+@@ -17,7 +17,9 @@ class BaseMotionAdapter(ABC):
+         pass
+ 
+     @abstractmethod
+-    def extract_motion(self, html: str, css: str = "") -> dict[str, Any]:
++    def extract_motion(
++        self, html: str, css: str = "", claimed_targets: set[str] | None = None
++    ) -> dict[str, Any]:
+         """
+         Extract motion configurations and return a dictionary conforming to the normalized schema:
+         {
+@@ -30,3 +32,4 @@ class BaseMotionAdapter(ABC):
+         }
+         """
+         pass
++
+diff --git a/src/webextractor/analysis/motion_adapters/framer.py b/src/webextractor/analysis/motion_adapters/framer.py
+index 1010bf9..0a8d400 100644
+--- a/src/webextractor/analysis/motion_adapters/framer.py
++++ b/src/webextractor/analysis/motion_adapters/framer.py
+@@ -23,7 +23,9 @@ class FramerMotionAdapter(BaseMotionAdapter):
+             or 'type="framer/appear"' in html
+         )
+ 
+-    def extract_motion(self, html: str, css: str = "") -> dict[str, Any]:
++    def extract_motion(
++        self, html: str, css: str = "", claimed_targets: set[str] | None = None
++    ) -> dict[str, Any]:
+         appear_animations: dict[str, Any] = {}
+         has_cursor = False
+         has_time_component = False
+@@ -106,6 +108,7 @@ class FramerMotionAdapter(BaseMotionAdapter):
+                                     "trigger": "mount",
+                                     "target": f'[data-framer-appear-id="{appear_id}"]',
+                                     "id": appear_id,
++                                    "adapter": "framer",
+                                     "initial": initial,
+                                     "animate": clean_animate,
+                                     "transition": transition,
+@@ -163,6 +166,7 @@ class FramerMotionAdapter(BaseMotionAdapter):
+                     "trigger": "mount",
+                     "target": f'[data-framer-appear-id="{appear_id}"]',
+                     "id": appear_id,
++                    "adapter": "framer",
+                     "initial": initial_cfg,
+                     "animate": {"opacity": 1, "y": 0},
+                     "transition": trans_cfg,
+diff --git a/src/webextractor/analysis/motion_adapters/standard.py b/src/webextractor/analysis/motion_adapters/standard.py
+index 74834e0..2f23ed1 100644
+--- a/src/webextractor/analysis/motion_adapters/standard.py
++++ b/src/webextractor/analysis/motion_adapters/standard.py
+@@ -23,8 +23,25 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
+     """
+ 
+     def can_handle(self, html: str, css: str = "") -> bool:
+-        # Standard adapter runs universally on any website
+-        return True
++        if not html and not css:
++            return False
++        has_css = bool(
++            css
++            and (
++                "@keyframes" in css
++                or "transition" in css
++                or "animation" in css
++            )
++        )
++        has_html = bool(
++            html
++            and (
++                "data-aos" in html
++                or "data-motion" in html
++                or re.search(r"\b\d{2}:\d{2}:\d{2}\b", html)
++            )
++        )
++        return has_css or has_html
+ 
+     @staticmethod
+     def _parse_transition_clause(clause: str) -> tuple[float | None, str | None, float | None]:
+@@ -53,7 +70,9 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
+ 
+         return dur_val, tf_val, delay_val
+ 
+-    def extract_motion(self, html: str, css: str = "") -> dict[str, Any]:
++    def extract_motion(
++        self, html: str, css: str = "", claimed_targets: set[str] | None = None
++    ) -> dict[str, Any]:
+         keyframes: list[dict[str, Any]] = []
+         motion_triggers: list[dict[str, Any]] = []
+         has_time_component = False
+@@ -168,6 +187,8 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
+ 
+                     if dur_val is not None or tf_val is not None:
+                         clean_sel = sel.split(",")[0].strip()
++                        if claimed_targets and any(ct in clean_sel for ct in claimed_targets):
++                            continue
+                         resolved_dur = dur_val if dur_val is not None else default_duration
+                         resolved_tf = tf_val or default_easing
+                         entry = {
+@@ -193,9 +214,12 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
+                 duration = el.get("data-aos-duration", "800")
+                 classes = el.get("class", [])
+                 target = "." + ".".join(classes[:2]) if classes else el.name
++                if claimed_targets and (target in claimed_targets or any(c in claimed_targets for c in classes)):
++                    continue
+                 motion_triggers.append({
+                     "trigger": "in_view",
+                     "target": target,
++                    "adapter": "standard",
+                     "effect": effect,
+                     "transition": {
+                         "delay": float(delay) / 1000.0 if delay.isdigit() else 0.0,

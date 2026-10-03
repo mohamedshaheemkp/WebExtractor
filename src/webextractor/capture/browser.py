@@ -244,7 +244,131 @@ class BrowserCapture:
                     return Array.from(links);
                 }
                 """
-            )
+            ) or []
+
+            # 4. SPA ROUTER MANIFEST DISCOVERY (e.g. Framer W router table)
+            try:
+                spa_routes = await page.evaluate(
+                    """
+                    async () => {
+                        const found = [];
+                        const scripts = Array.from(document.querySelectorAll('script'))
+                            .map(s => s.src)
+                            .filter(s => s && (s.includes('script_main') || s.includes('framer') || s.includes('routes')));
+                        for (const scriptUrl of scripts) {
+                            try {
+                                const res = await fetch(scriptUrl);
+                                const text = await res.text();
+                                const matches = text.matchAll(/path:\\s*[`"'](\\/[^`"']*)['"`]/g);
+                                for (const m of matches) {
+                                    const p = m[1];
+                                    if (p && !p.includes(':') && !found.includes(p)) {
+                                        found.push(p);
+                                    }
+                                }
+                            } catch (e) {}
+                        }
+                        return found;
+                    }
+                    """
+                )
+                if spa_routes:
+                    discovered_links.extend(spa_routes)
+            except Exception:
+                pass
+
+            # 5. DYNAMIC NAVIGATION / OVERLAY PROBE
+            # Trigger hamburger/navigation toggle so dynamically mounted links and overlay DOM are captured
+            overlay_dom = None
+            try:
+                menu_triggers = await page.query_selector_all(
+                    ".framer-zecFa, button[aria-label*='menu' i], [aria-expanded], [class*='menu' i], [data-framer-name*='menu' i], nav [data-highlight], header [data-highlight]"
+                )
+                for trig in menu_triggers:
+                    if await trig.is_visible():
+                        box = await trig.bounding_box()
+                        if box and box["width"] > 0 and box["height"] > 0:
+                            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                            await page.wait_for_timeout(500)
+
+                            mounted_links = await page.evaluate(
+                                """
+                                () => {
+                                    const links = [];
+                                    document.querySelectorAll("a[href]").forEach(el => {
+                                        const href = el.getAttribute("href");
+                                        if (href) links.push(href.trim());
+                                    });
+                                    return links;
+                                }
+                                """
+                            )
+                            if mounted_links:
+                                discovered_links.extend(mounted_links)
+
+                            overlay_dom = await page.evaluate(
+                                """
+                                () => {
+                                    const el = document.getElementById('overlay') ||
+                                               document.querySelector('[data-framer-name="Overlay"], .framer-overlay');
+                                    if (!el) return null;
+
+                                    function extract(element, depth = 0) {
+                                        if (!element || depth > 20) return null;
+                                        const rect = element.getBoundingClientRect();
+                                        const style = window.getComputedStyle(element);
+                                        const children = [];
+                                        for (const child of element.children) {
+                                            const res = extract(child, depth + 1);
+                                            if (res) children.push(res);
+                                        }
+                                        const attrs = {};
+                                        if (element.attributes) {
+                                            for (let i = 0; i < element.attributes.length; i++) {
+                                                const a = element.attributes[i];
+                                                attrs[a.name] = a.value;
+                                            }
+                                        }
+                                        return {
+                                            tag: element.tagName.toLowerCase(),
+                                            id: element.id || null,
+                                            classes: Array.from(element.classList),
+                                            rect: {
+                                                x: Math.round(rect.x),
+                                                y: Math.round(rect.y),
+                                                width: Math.round(rect.width),
+                                                height: Math.round(rect.height),
+                                            },
+                                            styles: {
+                                                display: style.display,
+                                                position: style.position,
+                                                zIndex: style.zIndex,
+                                                opacity: style.opacity,
+                                                transform: style.transform,
+                                                backgroundColor: style.backgroundColor,
+                                                color: style.color,
+                                            },
+                                            attributes: attrs,
+                                            children,
+                                            text: element.innerText ? element.innerText.replace(/\\s+/g, " ").trim().slice(0, 500) : "",
+                                        };
+                                    }
+                                    return extract(el);
+                                }
+                                """
+                            )
+
+                            # Close overlay
+                            try:
+                                await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                                await page.wait_for_timeout(300)
+                            except Exception:
+                                pass
+                            break
+            except Exception:
+                pass
+
+            discovered_links = list(dict.fromkeys(discovered_links))
 
             dom_snapshot = await page.evaluate(
                 """
@@ -401,6 +525,7 @@ class BrowserCapture:
             "requests": network_requests,
             "screenshot": str(screenshot_path),
             "discovered_links": discovered_links or [],
+            "overlay": overlay_dom,
             "css": css_text or "",
             "reveal_candidates": reveal_candidates or [],
             "viewport": {

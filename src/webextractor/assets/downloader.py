@@ -55,6 +55,8 @@ class AssetDownloader:
                 sanitized_parts[-1] = f"{last}{variant_suffix}"
 
         file_path = output_dir / domain / Path(*sanitized_parts)
+        if file_path.exists() and file_path.is_dir():
+            file_path = file_path / "index.bin"
         file_path.parent.mkdir(parents=True, exist_ok=True)
         asset.local_path = file_path
         asset.domain = domain
@@ -71,7 +73,7 @@ class AssetDownloader:
         assert asset.local_path is not None
 
         # If file already exists and has content, skip downloading
-        if asset.local_path.exists() and asset.local_path.stat().st_size > 0:
+        if asset.local_path.is_file() and asset.local_path.stat().st_size > 0:
             asset.downloaded = True
             asset.size = asset.local_path.stat().st_size
             return True

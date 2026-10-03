@@ -36,7 +36,7 @@ class AssetOrganizer:
         seen_dest_filenames: set[str] = set()
 
         for asset in assets:
-            if not asset.downloaded or not asset.local_path or not asset.local_path.exists():
+            if not asset.downloaded or not asset.local_path or not asset.local_path.is_file():
                 asset.downloaded = False
                 asset.local_path = None
                 asset.public_url = None
@@ -127,10 +127,14 @@ class AssetOrganizer:
             seen_dest_filenames.add(dest.name)
 
             if asset.local_path.resolve() != dest.resolve():
+                dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     shutil.copy2(asset.local_path, dest)
                 except Exception:
-                    pass
+                    asset.downloaded = False
+                    asset.local_path = None
+                    asset.public_url = None
+                    continue
 
             asset.local_path = dest
             asset.public_url = f"/{folder_name}/{dest.name}"

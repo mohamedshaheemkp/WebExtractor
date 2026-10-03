@@ -1,0 +1,1057 @@
+diff --git a/src/webextractor/analysis/analyzer.py b/src/webextractor/analysis/analyzer.py
+index 967998b..23e3764 100644
+--- a/src/webextractor/analysis/analyzer.py
++++ b/src/webextractor/analysis/analyzer.py
+@@ -110,6 +110,8 @@ class SiteAnalyzer:
+             asset_manifest=manifest,
+             page_components=page_components,
+             reusable_components=reusable_components,
++            pages=capture.get("pages", []),
++            overlay=capture.get("overlay"),
+         )
+ 
+         # 5. Extract Typography System
+@@ -399,6 +401,7 @@ class SiteAnalyzer:
+         setattr(site_model, "viewports", capture.get("viewports", {}))
+         setattr(site_model, "animations", animations)
+         setattr(site_model, "interactions", interactions)
++        setattr(site_model, "overlay", capture.get("overlay"))
+ 
+         return site_model
+ 
+@@ -529,7 +532,7 @@ class SiteAnalyzer:
+                         appear[cid]["transition"]["timing_function"] = resolved_tf
+                         appear[cid]["transition"]["easing"] = resolved_tf
+                         appear[cid]["transition"]["ease"] = resolved_tf
+-                    if dur_val is not None:
++                    if dur_val is not None and dur_val > 0:
+                         appear[cid]["transition"]["duration"] = round(dur_val, 2)
+ 
+             if framer_appear_id and framer_appear_id not in appear:
+@@ -565,10 +568,15 @@ class SiteAnalyzer:
+                         trg["transition"]["timing_function"] = resolved_tf
+                         trg["transition"]["easing"] = resolved_tf
+                         trg["transition"]["ease"] = resolved_tf
+-                    if dur_val is not None:
++                    if dur_val is not None and dur_val > 0:
+                         trg["transition"]["duration"] = round(dur_val, 2)
+ 
+-            if not trigger_updated and (framer_appear_id or motion_id):
++            # Do not append appear animations to motion_triggers if they already exist in appear_animations
++            already_in_appear = (
++                (framer_appear_id and framer_appear_id in appear)
++                or (motion_id and motion_id in appear)
++            )
++            if not trigger_updated and not already_in_appear and (framer_appear_id or motion_id):
+                 target = (
+                     f'[data-framer-appear-id="{framer_appear_id}"]'
+                     if framer_appear_id
+@@ -578,10 +586,11 @@ class SiteAnalyzer:
+                     "trigger": "mount" if framer_appear_id else "in_view",
+                     "target": target,
+                     "id": framer_appear_id or motion_id,
++                    "adapter": "analyzer",
+                     "initial": {"opacity": 0, "y": 20},
+                     "animate": {"opacity": 1, "y": 0},
+                     "transition": {
+-                        "duration": round(resolved_dur, 2),
++                        "duration": round(resolved_dur, 2) if resolved_dur > 0 else 0.6,
+                         "type": "tween",
+                         "timing_function": resolved_tf,
+                         "easing": resolved_tf,
+diff --git a/src/webextractor/analysis/animations.py b/src/webextractor/analysis/animations.py
+index 8285185..eca7741 100644
+--- a/src/webextractor/analysis/animations.py
++++ b/src/webextractor/analysis/animations.py
+@@ -21,6 +21,76 @@ class AnimationExtractor:
+         else:
+             self.adapters = adapters
+ 
++    @staticmethod
++    def _targets_overlap(t1_target: str, t1_id: str | None, t2_target: str, t2_id: str | None) -> bool:
++        """Return True if two triggers target the same DOM element."""
++        if t1_id and t2_id and t1_id == t2_id:
++            return True
++        if t1_target and t2_target and t1_target == t2_target:
++            return True
++        if t1_id and t2_target and (t1_id == t2_target or f'"{t1_id}"' in t2_target or f"'{t1_id}'" in t2_target or t1_id in t2_target):
++            return True
++        if t2_id and t1_target and (t2_id == t1_target or f'"{t2_id}"' in t1_target or f"'{t2_id}'" in t1_target or t2_id in t1_target):
++            return True
++        return False
++
++    @staticmethod
++    def _extract_property_set(trigger: dict[str, Any]) -> set[str]:
++        """Extract the set of animated properties for this trigger."""
++        props = set()
++        initial = trigger.get("initial", {}) or {}
++        animate = trigger.get("animate", {}) or {}
++        props.update(initial.keys())
++        props.update(animate.keys())
++        if trigger.get("effect"):
++            props.add(trigger["effect"])
++        if not props:
++            props.update(["opacity", "transform"])
++        return props
++
++    @classmethod
++    def reconcile_motion_triggers(
++        cls,
++        existing: list[dict[str, Any]],
++        incoming: list[dict[str, Any]],
++        adapter_name: str = "",
++    ) -> None:
++        """
++        Reconcile motion_triggers so there is at most one trigger per (target, property-set).
++        Records the winning adapter.
++        """
++        for new_trg in incoming:
++            if adapter_name and not new_trg.get("adapter"):
++                new_trg["adapter"] = adapter_name
++
++            new_target = new_trg.get("target", "")
++            new_id = new_trg.get("id")
++            new_props = cls._extract_property_set(new_trg)
++
++            match = None
++            for ex_trg in existing:
++                ex_target = ex_trg.get("target", "")
++                ex_id = ex_trg.get("id")
++                if cls._targets_overlap(new_target, new_id, ex_target, ex_id):
++                    ex_props = cls._extract_property_set(ex_trg)
++                    if not new_props or not ex_props or bool(new_props & ex_props):
++                        match = ex_trg
++                        break
++
++            if match is None:
++                existing.append(new_trg)
++            else:
++                # Existing trigger from earlier higher-priority adapter wins
++                if not match.get("adapter"):
++                    match["adapter"] = match.get("source") or "framer"
++                for k, v in new_trg.items():
++                    if k == "transition":
++                        match.setdefault("transition", {})
++                        for tk, tv in (v or {}).items():
++                            match["transition"].setdefault(tk, tv)
++                    elif k not in match:
++                        match[k] = v
++
+     def analyze_motion(
+         self,
+         html_content: str,
+@@ -40,19 +110,48 @@ class AnimationExtractor:
+             "timing_function": None,
+         }
+ 
++        claimed_targets: set[str] = set()
++
+         for adapter in self.adapters:
+             if adapter.can_handle(html_content, css_content):
+-                res = adapter.extract_motion(html_content, css_content)
++                adapter_name = "framer" if "framer" in adapter.__class__.__name__.lower() else (
++                    "standard" if "standard" in adapter.__class__.__name__.lower() else adapter.__class__.__name__.lower()
++                )
++                res = adapter.extract_motion(html_content, css_content, claimed_targets=claimed_targets)
++
++                # Track claimed targets from this adapter
++                for app_id in res.get("appear_animations", {}):
++                    claimed_targets.add(app_id)
++                for trg in res.get("motion_triggers", []):
++                    if trg.get("id"):
++                        claimed_targets.add(trg["id"])
++                    if trg.get("target"):
++                        claimed_targets.add(trg["target"])
++                for sel in res.get("parallax_elements", []):
++                    claimed_targets.add(sel)
++
+                 merged["appear_animations"].update(res.get("appear_animations", {}))
+                 if res.get("element_transitions"):
+-                    merged["element_transitions"].update(res["element_transitions"])
++                    for sel, t_data in res["element_transitions"].items():
++                        if not any(ct in sel for ct in claimed_targets):
++                            merged["element_transitions"].setdefault(sel, t_data)
++                        elif sel not in merged["element_transitions"]:
++                            merged["element_transitions"][sel] = t_data
++
+                 merged["keyframes"].extend(res.get("keyframes", []))
+                 if res.get("has_cursor"):
+                     merged["has_cursor"] = True
+                 if res.get("has_time_component"):
+                     merged["has_time_component"] = True
+                 merged["parallax_elements"].extend(res.get("parallax_elements", []))
+-                merged["motion_triggers"].extend(res.get("motion_triggers", []))
++
++                # Reconcile motion triggers ensuring at most one per (target, property-set)
++                self.reconcile_motion_triggers(
++                    merged["motion_triggers"],
++                    res.get("motion_triggers", []),
++                    adapter_name=adapter_name,
++                )
++
+                 if res.get("default_transition_duration"):
+                     merged["default_transition_duration"] = res["default_transition_duration"]
+                 tf_val = res.get("default_timing_function") or res.get("default_easing") or res.get("timing_function")
+diff --git a/src/webextractor/analysis/motion_adapters/base.py b/src/webextractor/analysis/motion_adapters/base.py
+index 5bf8768..06c6cd2 100644
+--- a/src/webextractor/analysis/motion_adapters/base.py
++++ b/src/webextractor/analysis/motion_adapters/base.py
+@@ -17,7 +17,9 @@ class BaseMotionAdapter(ABC):
+         pass
+ 
+     @abstractmethod
+-    def extract_motion(self, html: str, css: str = "") -> dict[str, Any]:
++    def extract_motion(
++        self, html: str, css: str = "", claimed_targets: set[str] | None = None
++    ) -> dict[str, Any]:
+         """
+         Extract motion configurations and return a dictionary conforming to the normalized schema:
+         {
+@@ -30,3 +32,4 @@ class BaseMotionAdapter(ABC):
+         }
+         """
+         pass
++
+diff --git a/src/webextractor/analysis/motion_adapters/framer.py b/src/webextractor/analysis/motion_adapters/framer.py
+index 1010bf9..0a8d400 100644
+--- a/src/webextractor/analysis/motion_adapters/framer.py
++++ b/src/webextractor/analysis/motion_adapters/framer.py
+@@ -23,7 +23,9 @@ class FramerMotionAdapter(BaseMotionAdapter):
+             or 'type="framer/appear"' in html
+         )
+ 
+-    def extract_motion(self, html: str, css: str = "") -> dict[str, Any]:
++    def extract_motion(
++        self, html: str, css: str = "", claimed_targets: set[str] | None = None
++    ) -> dict[str, Any]:
+         appear_animations: dict[str, Any] = {}
+         has_cursor = False
+         has_time_component = False
+@@ -106,6 +108,7 @@ class FramerMotionAdapter(BaseMotionAdapter):
+                                     "trigger": "mount",
+                                     "target": f'[data-framer-appear-id="{appear_id}"]',
+                                     "id": appear_id,
++                                    "adapter": "framer",
+                                     "initial": initial,
+                                     "animate": clean_animate,
+                                     "transition": transition,
+@@ -163,6 +166,7 @@ class FramerMotionAdapter(BaseMotionAdapter):
+                     "trigger": "mount",
+                     "target": f'[data-framer-appear-id="{appear_id}"]',
+                     "id": appear_id,
++                    "adapter": "framer",
+                     "initial": initial_cfg,
+                     "animate": {"opacity": 1, "y": 0},
+                     "transition": trans_cfg,
+diff --git a/src/webextractor/analysis/motion_adapters/standard.py b/src/webextractor/analysis/motion_adapters/standard.py
+index 74834e0..2f23ed1 100644
+--- a/src/webextractor/analysis/motion_adapters/standard.py
++++ b/src/webextractor/analysis/motion_adapters/standard.py
+@@ -23,8 +23,25 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
+     """
+ 
+     def can_handle(self, html: str, css: str = "") -> bool:
+-        # Standard adapter runs universally on any website
+-        return True
++        if not html and not css:
++            return False
++        has_css = bool(
++            css
++            and (
++                "@keyframes" in css
++                or "transition" in css
++                or "animation" in css
++            )
++        )
++        has_html = bool(
++            html
++            and (
++                "data-aos" in html
++                or "data-motion" in html
++                or re.search(r"\b\d{2}:\d{2}:\d{2}\b", html)
++            )
++        )
++        return has_css or has_html
+ 
+     @staticmethod
+     def _parse_transition_clause(clause: str) -> tuple[float | None, str | None, float | None]:
+@@ -53,7 +70,9 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
+ 
+         return dur_val, tf_val, delay_val
+ 
+-    def extract_motion(self, html: str, css: str = "") -> dict[str, Any]:
++    def extract_motion(
++        self, html: str, css: str = "", claimed_targets: set[str] | None = None
++    ) -> dict[str, Any]:
+         keyframes: list[dict[str, Any]] = []
+         motion_triggers: list[dict[str, Any]] = []
+         has_time_component = False
+@@ -168,6 +187,8 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
+ 
+                     if dur_val is not None or tf_val is not None:
+                         clean_sel = sel.split(",")[0].strip()
++                        if claimed_targets and any(ct in clean_sel for ct in claimed_targets):
++                            continue
+                         resolved_dur = dur_val if dur_val is not None else default_duration
+                         resolved_tf = tf_val or default_easing
+                         entry = {
+@@ -193,9 +214,12 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
+                 duration = el.get("data-aos-duration", "800")
+                 classes = el.get("class", [])
+                 target = "." + ".".join(classes[:2]) if classes else el.name
++                if claimed_targets and (target in claimed_targets or any(c in claimed_targets for c in classes)):
++                    continue
+                 motion_triggers.append({
+                     "trigger": "in_view",
+                     "target": target,
++                    "adapter": "standard",
+                     "effect": effect,
+                     "transition": {
+                         "delay": float(delay) / 1000.0 if delay.isdigit() else 0.0,
+diff --git a/src/webextractor/generator/project.py b/src/webextractor/generator/project.py
+index f685b3d..d1ee1ea 100644
+--- a/src/webextractor/generator/project.py
++++ b/src/webextractor/generator/project.py
+@@ -43,6 +43,8 @@ class ReactProjectGenerator:
+         self.emitter = DomToJsxEmitter(
+             component_tree=self.ir.get("components"),
+             asset_bindings=self.ir.get("asset_bindings", []),
++            assets=self.ir.get("assets", []),
++            asset_manifest=self.ir.get("asset_manifest", []),
+             motion_targets=motion_targets,
+         )
+ 
+@@ -60,6 +62,7 @@ class ReactProjectGenerator:
+         self._write_not_found_page()
+         self._write_data()
+         self._write_analysis()
++        self._verify_asset_invariants()
+ 
+         return self.output
+ 
+@@ -218,9 +221,13 @@ export default nextConfig;
+             layout_imports.append('import RouteTransition from "../components/RouteTransition";')
+             layout_elements.append("        <RouteTransition />")
+ 
+-        if has_cursor:
+-            layout_imports.append('import CursorRuntime, { CursorFollower } from "../components/CursorRuntime";')
+-            layout_elements.append("        <CursorRuntime />")
++        # Always include NavigationOverlay for full responsive navigation
++        layout_imports.append('import NavigationOverlay from "../components/NavigationOverlay";')
++        layout_elements.append("        <NavigationOverlay />")
++
++        # Always include CursorRuntime (self-guards to @media (hover: hover) and (pointer: fine))
++        layout_imports.append('import CursorRuntime, { CursorFollower } from "../components/CursorRuntime";')
++        layout_elements.append("        <CursorRuntime />")
+ 
+         imports_str = "\n".join(layout_imports)
+         elements_str = "\n".join(layout_elements)
+@@ -675,10 +682,12 @@ code, pre, kbd {
+   font-family: var(--font-mono, ui-monospace, monospace);
+ }
+ 
+-/* Custom Cursor Native Suppression */
+-body.has-custom-cursor,
+-body.has-custom-cursor * {
+-  cursor: none !important;
++/* Custom Cursor Native Suppression (desktop fine pointer only) */
++@media (hover: hover) and (pointer: fine) {
++  body.has-custom-cursor,
++  body.has-custom-cursor * {
++    cursor: none !important;
++  }
+ }
+ 
+ /* Responsive fallback for single-variant SSR sections: prevent desktop-only capture from vanishing on viewports < 1440px */
+@@ -1109,7 +1118,7 @@ export default function MotionRuntime({
+     }
+ 
+     // Safe element finder: handles IDs starting with numbers and arbitrary strings without CSS selector errors
+-    const findTarget = (targetId: string): HTMLElement | null => {
++    const findTarget = (targetId: string): Element | null => {
+       if (!targetId) return null;
+       const byId = document.getElementById(targetId);
+       if (byId) return byId;
+@@ -1118,13 +1127,13 @@ export default function MotionRuntime({
+         const el = document.querySelector(
+           `[data-motion-id="${targetId}"], [data-framer-appear-id="${targetId}"], [id="${targetId}"]`
+         );
+-        if (el instanceof HTMLElement) return el;
++        if (el instanceof Element) return el;
+       } catch {}
+ 
+       try {
+         const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(targetId) : targetId;
+         const el = document.querySelector(`.motion-${escaped}`);
+-        if (el instanceof HTMLElement) return el;
++        if (el instanceof Element) return el;
+       } catch {}
+ 
+       return null;
+@@ -1132,11 +1141,16 @@ export default function MotionRuntime({
+ 
+     const defaultTimingFunction = (animations && (animations.timing_function || animations.default_timing_function || animations.default_easing)) || "cubic-bezier(0.25, 0.1, 0.25, 1)";
+ 
++    // Track bound elements to ensure each DOM node is bound at most once
++    const boundElements = new Set<Element>();
++
+     // 1. Process Appear / Motion Configs
+     Object.entries(appearMap).forEach(([targetId, config]) => {
+       const el = findTarget(targetId);
+-      if (!el) return;
++      if (!el || boundElements.has(el)) return;
++      boundElements.add(el);
+ 
++      const htmlEl = el instanceof HTMLElement ? el : null;
+       const initial = config.initial || {};
+       const animate = config.animate || {};
+       const hover = config.hover || {};
+@@ -1152,6 +1166,18 @@ export default function MotionRuntime({
+       const initOpacity = initial.opacity !== undefined ? initial.opacity : 1;
+       const targetOpacity = animate.opacity !== undefined ? animate.opacity : 1;
+ 
++      // Final visible state guarantee
++      const ensureFinalVisibleState = () => {
++        if (htmlEl) {
++          htmlEl.style.opacity = `${targetOpacity}`;
++          if (targetTransform && targetTransform !== "translate3d(0px, 0px, 0) scale(1) rotate(0deg)") {
++            htmlEl.style.transform = targetTransform;
++          } else {
++            htmlEl.style.transform = "";
++          }
++        }
++      };
++
+       const runEntranceAnimation = () => {
+         try {
+           const keyframes = config.keyframes || [
+@@ -1160,17 +1186,18 @@ export default function MotionRuntime({
+           ];
+           const easing = transition.timing_function || transition.easing || transition.ease || defaultTimingFunction || (transition.type === "spring" ? "cubic-bezier(0.16, 1, 0.3, 1)" : "cubic-bezier(0.25, 0.1, 0.25, 1)");
+           const anim = el.animate(keyframes, {
+-            duration: durationMs,
++            duration: Math.max(durationMs, 10),
+             delay: delayMs,
+             easing: easing,
+-            fill: "both",
++            fill: "forwards",
+             iterations: isContinuous ? Infinity : 1,
+             direction: isContinuous ? (config.direction || "normal") : "normal",
+           });
++          anim.onfinish = () => ensureFinalVisibleState();
++          anim.oncancel = () => ensureFinalVisibleState();
+           return anim;
+         } catch (err) {
+-          el.style.transform = targetTransform;
+-          el.style.opacity = `${targetOpacity}`;
++          ensureFinalVisibleState();
+         }
+       };
+ 
+@@ -1184,16 +1211,19 @@ export default function MotionRuntime({
+               if (entry.isIntersecting) {
+                 runEntranceAnimation();
+                 if (once) observer.unobserve(el);
+-              } else if (!once) {
+-                el.style.opacity = `${initOpacity}`;
+-                el.style.transform = initTransform;
+               }
+             });
+           },
+           { threshold: config.threshold || 0.15 }
+         );
+         observer.observe(el);
+-        cleanupFns.push(() => observer.disconnect());
++        // Fallback: ensure elements never remain permanently hidden if observer never triggers
++        const fallbackTimer = setTimeout(ensureFinalVisibleState, 3000);
++        cleanupFns.push(() => {
++          clearTimeout(fallbackTimer);
++          observer.disconnect();
++          ensureFinalVisibleState();
++        });
+       } else {
+         runEntranceAnimation();
+       }
+@@ -1826,77 +1856,372 @@ export default function RouteTransition() {
+             "components/CursorRuntime.tsx",
+             """\"use client\";
+ 
+-import React, { useState, useEffect } from "react";
++import React, { useEffect, useRef } from "react";
+ 
+ export function CursorFollower() {
+   return null;
+ }
+ 
+ export default function CursorRuntime() {
+-  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+-  const [isHovered, setIsHovered] = useState(false);
+-  const [hoverText, setHoverText] = useState("");
+-  const [visible, setVisible] = useState(false);
++  const cursorRef = useRef<HTMLDivElement>(null);
++  const textRef = useRef<HTMLSpanElement>(null);
+ 
+   useEffect(() => {
+-    // Suppress native cursor while custom cursor is active
++    // 1. Desktop fine-pointer guard: disable custom cursor on touch/mobile
++    if (typeof window === "undefined") return;
++    const mediaQuery = window.matchMedia("(hover: hover) and (pointer: fine)");
++    if (!mediaQuery.matches) {
++      // Touch/mobile device: native cursor remains active, suppression class is never added
++      return;
++    }
++
++    const cursor = cursorRef.current;
++    const textEl = textRef.current;
++    if (!cursor) return;
++
++    // Suppress native cursor on fine-pointer devices
+     document.body.classList.add("has-custom-cursor");
+ 
+-    const onMove = (e: MouseEvent) => {
+-      setPos({ x: e.clientX, y: e.clientY });
+-      setVisible(true);
++    let mouseX = -100;
++    let mouseY = -100;
++    let isVisible = false;
++    let isHovering = false;
++    let currentLabel = "";
++    let rafId: number | null = null;
++
++    const render = () => {
++      if (!cursor) return;
++      if (!isVisible) {
++        cursor.style.opacity = "0";
++      } else {
++        cursor.style.opacity = "1";
++        cursor.style.left = `${mouseX}px`;
++        cursor.style.top = `${mouseY}px`;
++
++        if (isHovering && currentLabel) {
++          cursor.style.width = "72px";
++          cursor.style.height = "72px";
++          cursor.style.borderRadius = "50%";
++          cursor.style.backgroundColor = "#ffffff";
++          cursor.style.mixBlendMode = "normal";
++          cursor.style.color = "#000000";
++          if (textEl) {
++            textEl.textContent = currentLabel;
++            textEl.style.display = "block";
++          }
++        } else {
++          cursor.style.width = "16px";
++          cursor.style.height = "16px";
++          cursor.style.borderRadius = "50%";
++          cursor.style.backgroundColor = "#ffffff";
++          cursor.style.mixBlendMode = "difference";
++          cursor.style.color = "transparent";
++          if (textEl) {
++            textEl.textContent = "";
++            textEl.style.display = "none";
++          }
++        }
++      }
++      rafId = null;
++    };
++
++    const requestRender = () => {
++      if (rafId === null) {
++        rafId = requestAnimationFrame(render);
++      }
++    };
++
++    const onMouseMove = (e: MouseEvent) => {
++      mouseX = e.clientX;
++      mouseY = e.clientY;
++      isVisible = true;
+ 
+       const target = e.target as HTMLElement | null;
+       if (target) {
+-        const interactive = target.closest("a, button, [role='button'], .project-card, [data-cursor]");
+-        if (interactive) {
+-          setIsHovered(true);
+-          const customText = interactive.getAttribute("data-cursor") || (interactive.classList.contains("project-card") ? "VIEW" : "");
+-          setHoverText(customText);
++        const hoverTarget = target.closest(
++          "[data-framer-cursor], [data-cursor], a[href*='/work/'], a[href*='/motion/'], .project-card, [data-highlight]"
++        );
++        if (hoverTarget) {
++          isHovering = true;
++          currentLabel =
++            hoverTarget.getAttribute("data-framer-cursor") ||
++            hoverTarget.getAttribute("data-cursor") ||
++            "VIEW";
+         } else {
+-          setIsHovered(false);
+-          setHoverText("");
++          isHovering = false;
++          currentLabel = "";
+         }
+       }
++      requestRender();
++    };
++
++    const onMouseLeave = () => {
++      isVisible = false;
++      requestRender();
++    };
++
++    const onMouseEnter = () => {
++      isVisible = true;
++      requestRender();
+     };
+ 
+-    const onLeave = () => setVisible(false);
++    window.addEventListener("mousemove", onMouseMove, { passive: true });
++    document.addEventListener("mouseleave", onMouseLeave);
++    document.addEventListener("mouseenter", onMouseEnter);
+ 
+-    window.addEventListener("mousemove", onMove);
+-    document.body.addEventListener("mouseleave", onLeave);
+     return () => {
+       document.body.classList.remove("has-custom-cursor");
+-      window.removeEventListener("mousemove", onMove);
+-      document.body.removeEventListener("mouseleave", onLeave);
++      window.removeEventListener("mousemove", onMouseMove);
++      document.removeEventListener("mouseleave", onMouseLeave);
++      document.removeEventListener("mouseenter", onMouseEnter);
++      if (rafId !== null) cancelAnimationFrame(rafId);
+     };
+   }, []);
+ 
+-  if (!pos || !visible) return null;
+-
+   return (
+     <div
++      ref={cursorRef}
+       id="custom-cursor"
++      aria-hidden="true"
+       style={{
+         position: "fixed",
+-        top: pos.y,
+-        left: pos.x,
+-        transform: `translate(-50%, -50%) scale(${isHovered ? 2.2 : 1})`,
+-        width: isHovered && hoverText ? 36 : 14,
+-        height: isHovered && hoverText ? 36 : 14,
++        top: -100,
++        left: -100,
++        width: 16,
++        height: 16,
+         borderRadius: "50%",
+-        backgroundColor: isHovered ? "rgba(255, 255, 255, 0.9)" : "var(--token-cursor, #ffffff)",
+-        color: "#000000",
++        backgroundColor: "#ffffff",
++        mixBlendMode: "difference",
++        transform: "translate(-50%, -50%)",
++        pointerEvents: "none",
++        zIndex: 999999,
++        opacity: 0,
+         display: "flex",
+         alignItems: "center",
+         justifyContent: "center",
+-        fontSize: "8px",
+-        fontWeight: "bold",
+-        pointerEvents: "none",
+-        zIndex: 9999,
+-        transition: "transform 0.15s ease-out, width 0.2s ease, height 0.2s ease, opacity 0.2s ease",
++        fontSize: "11px",
++        fontWeight: 700,
++        letterSpacing: "0.05em",
++        textTransform: "uppercase",
++        transition:
++          "width 0.22s cubic-bezier(0.16, 1, 0.3, 1), height 0.22s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, opacity 0.2s ease",
++      }}
++    >
++      <span ref={textRef} style={{ display: "none", userSelect: "none" }} />
++    </div>
++  );
++}
++""",
++        )
++
++        # 8. NavigationOverlay.tsx (Evidence-driven responsive navigation overlay)
++        self._text(
++            "components/NavigationOverlay.tsx",
++            """\"use client\";
++
++import React, { useState, useEffect } from "react";
++import Link from "next/link";
++import { usePathname } from "next/navigation";
++
++export default function NavigationOverlay() {
++  const [isOpen, setIsOpen] = useState(false);
++  const pathname = usePathname();
++
++  // Close overlay on route navigation
++  useEffect(() => {
++    setIsOpen(false);
++  }, [pathname]);
++
++  // Wire hamburger toggle click (.framer-zecFa, [aria-label*="menu"], etc.)
++  useEffect(() => {
++    const handleTriggerClick = (e: MouseEvent) => {
++      const target = e.target as HTMLElement | null;
++      if (!target) return;
++      const trig = target.closest(
++        ".framer-zecFa, [data-framer-name='Menu'], button[aria-label*='menu' i], [data-menu-trigger]"
++      );
++      if (trig) {
++        e.preventDefault();
++        e.stopPropagation();
++        setIsOpen((prev) => !prev);
++      }
++    };
++
++    const handleKeyDown = (e: KeyboardEvent) => {
++      if (e.key === "Escape") {
++        setIsOpen(false);
++      }
++    };
++
++    document.addEventListener("click", handleTriggerClick);
++    window.addEventListener("keydown", handleKeyDown);
++    return () => {
++      document.removeEventListener("click", handleTriggerClick);
++      window.removeEventListener("keydown", handleKeyDown);
++    };
++  }, []);
++
++  if (!isOpen) return null;
++
++  return (
++    <div
++      id="overlay"
++      style={{
++        position: "fixed",
++        inset: 0,
++        zIndex: 99999,
++        backgroundColor: "#000000",
++        color: "#ffffff",
++        display: "flex",
++        flexDirection: "column",
++        justifyContent: "space-between",
++        padding: "40px 32px",
++        overflowY: "auto",
++        transition: "opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
+       }}
+     >
+-      {isHovered && hoverText ? hoverText : null}
++      {/* Top Bar */}
++      <div
++        style={{
++          display: "flex",
++          justifyContent: "space-between",
++          alignItems: "center",
++          width: "100%",
++        }}
++      >
++        <div style={{ fontFamily: "var(--font-mono, monospace)", fontSize: "14px", opacity: 0.8 }}>
++          LOCAL/ <span style={{ color: "#ffffff" }}>46° 28' 58.6272\\" N</span>
++        </div>
++        <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
++          <Link
++            href="/contact"
++            onClick={() => setIsOpen(false)}
++            style={{
++              padding: "10px 24px",
++              borderRadius: "60px",
++              border: "1px solid #333333",
++              backgroundColor: "transparent",
++              color: "#ffffff",
++              textDecoration: "none",
++              fontFamily: "var(--font-display, inherit)",
++              fontSize: "12px",
++              fontWeight: 600,
++              letterSpacing: "0.1em",
++              textTransform: "uppercase",
++            }}
++          >
++            CONTACT NOW
++          </Link>
++          {/* Close button */}
++          <button
++            type="button"
++            aria-label="Close Navigation"
++            onClick={() => setIsOpen(false)}
++            style={{
++              width: "48px",
++              height: "48px",
++              borderRadius: "50%",
++              backgroundColor: "rgb(107, 107, 107)",
++              border: "none",
++              color: "#000000",
++              cursor: "pointer",
++              display: "flex",
++              alignItems: "center",
++              justifyContent: "center",
++              transform: "rotate(45deg)",
++              transition: "transform 0.2s ease",
++            }}
++          >
++            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
++              <path d="M6 12h12M12 6v12" strokeLinecap="round" strokeLinejoin="round" />
++            </svg>
++          </button>
++        </div>
++      </div>
++
++      {/* Center Navigation Links */}
++      <nav
++        style={{
++          display: "flex",
++          flexDirection: "column",
++          alignItems: "center",
++          justifyContent: "center",
++          gap: "20px",
++          margin: "60px 0",
++        }}
++      >
++        {[
++          { label: "Home", href: "/" },
++          { label: "Work", href: "/work" },
++          { label: "DESIGNS", href: "/designs" },
++          { label: "MOTION", href: "/motion" },
++          { label: "Contact", href: "/contact" },
++        ].map((item) => {
++          const isActive = pathname === item.href || (item.href !== "/" && pathname?.startsWith(item.href));
++          return (
++            <Link
++              key={item.href}
++              href={item.href}
++              onClick={() => setIsOpen(false)}
++              style={{
++                fontFamily: "var(--font-display, inherit)",
++                fontSize: "clamp(36px, 6vw, 64px)",
++                fontWeight: 700,
++                textDecoration: "none",
++                color: isActive ? "rgb(128, 128, 128)" : "#ffffff",
++                transition: "color 0.2s ease, transform 0.2s ease",
++              }}
++            >
++              {item.label}
++            </Link>
++          );
++        })}
++      </nav>
++
++      {/* Bottom Bar: Copyright & Social Links */}
++      <div
++        style={{
++          display: "flex",
++          justifyContent: "space-between",
++          alignItems: "center",
++          flexWrap: "wrap",
++          gap: "20px",
++          borderTop: "1px solid rgb(22, 22, 22)",
++          paddingTop: "24px",
++          width: "100%",
++        }}
++      >
++        <p style={{ fontFamily: "var(--font-body, inherit)", fontSize: "14px", opacity: 0.7, margin: 0 }}>
++          ©2024 All RIGHTS Reserved
++        </p>
++        <div style={{ display: "flex", gap: "24px" }}>
++          {[
++            { name: "Instagram", url: "https://www.instagram.com/" },
++            { name: "Dribbble", url: "https://dribbble.com/" },
++            { name: "Twitter", url: "https://x.com/MandroDesign" },
++          ].map((s) => (
++            <a
++              key={s.name}
++              href={s.url}
++              target="_blank"
++              rel="noopener noreferrer"
++              style={{
++                color: "#ffffff",
++                textDecoration: "none",
++                fontFamily: "var(--font-display, inherit)",
++                fontSize: "14px",
++                display: "inline-flex",
++                alignItems: "center",
++                gap: "4px",
++                opacity: 0.8,
++              }}
++            >
++              <span>{s.name}</span>
++              <span style={{ transform: "rotate(45deg)", display: "inline-block", fontSize: "12px" }}>↑</span>
++            </a>
++          ))}
++        </div>
++      </div>
+     </div>
+   );
+ }
+@@ -1916,6 +2241,7 @@ export default function CursorRuntime() {
+         )
+ 
+         has_work_routes = False
++        has_work_index = False
+         has_contact_route = False
+ 
+         for route in routes:
+@@ -1927,24 +2253,28 @@ export default function CursorRuntime() {
+             if clean_route == "/contact":
+                 has_contact_route = True
+                 self._write_contact_page()
++            elif clean_route == "/work":
++                has_work_index = True
++                self._write_work_index_page()
+             elif clean_route.startswith("/work/"):
+                 has_work_routes = True
+                 self._write_work_page(clean_route)
++            elif clean_route in ("/404", "/not-found"):
++                # Handled by _write_not_found_page
++                pass
+             else:
+                 self._write_custom_page(clean_route)
+ 
+-        # Generate work pages from data if data['projects'] exists or work routes were found
++        # Generate work pages from data if data['projects'] exists
+         projects = self.ir.get("data", {}).get("projects", [])
+-        if projects or has_work_routes or any(r == "/work" or r.startswith("/work/") for r in routes):
+-            for p in projects:
+-                slug = p.get("slug")
+-                if slug:
+-                    self._write_work_page(f"/work/{slug}")
+-            self._write_work_dynamic_page()
+-            self._write_work_index_page()
++        for p in projects:
++            slug = p.get("slug")
++            if slug:
++                self._write_work_page(f"/work/{slug}")
+ 
+-        if has_contact_route or "/contact" in routes:
+-            self._write_contact_page()
++        self._write_work_dynamic_page()
++        if not has_work_index and (has_work_routes or projects or any(r == "/work" or r.startswith("/work/") for r in routes)):
++            self._write_work_index_page()
+ 
+     def _write_home_page(self):
+         pages = self.ir.get("pages", [])
+@@ -2120,6 +2450,30 @@ export default function WorkIndexPage() {{
+         footer_tag = f"      <{footer_name} />\n" if footer_name else ""
+ 
+         projects = self.ir.get("data", {}).get("projects", [])
++        if not projects:
++            # Honest pipeline notice: never silently fabricate fake cards
++            self._text(
++                "app/work/page.tsx",
++                f"""import React from "react";
++{nav_import}{footer_import}
++export default function WorkIndexPage() {{
++  return (
++    <main>
++{nav_tag}      <section style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "60vh" }}}}>
++        <h1 style={{{{ fontFamily: "var(--font-display)", fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 700 }}}}>
++          Work
++        </h1>
++        <p style={{{{ opacity: 0.6, marginTop: "16px" }}}}>
++          Pipeline Notice: Route /work was not captured from source evidence.
++        </p>
++      </section>
++{footer_tag}    </main>
++  );
++}}
++""",
++            )
++            return
++
+         project_cards = []
+         for p in projects:
+             slug = p.get("slug") or self._slugify(p.get("title", ""))
+@@ -2243,6 +2597,30 @@ export default function WorkPage() {{
+         projects = self.ir.get("data", {}).get("projects", [])
+         proj = next((p for p in projects if p.get("slug") == slug or self._slugify(p.get("title", "")) == slug), None)
+ 
++        if not proj:
++            # Honest pipeline notice: never silently fabricate fake content
++            self._text(
++                f"app/work/{slug}/page.tsx",
++                f"""import React from "react";
++{nav_import}{footer_import}
++export default function WorkPage() {{
++  return (
++    <main>
++{nav_tag}      <section style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "60vh" }}}}>
++        <h1 style={{{{ fontFamily: "var(--font-display)", fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 700 }}}}>
++          {title}
++        </h1>
++        <p style={{{{ opacity: 0.6, marginTop: "16px" }}}}>
++          Pipeline Notice: Route {route} was not captured from source evidence.
++        </p>
++      </section>
++{footer_tag}    </main>
++  );
++}}
++""",
++            )
++            return
++
+         proj_title = proj.get("title") if proj else title
+         proj_cat = proj.get("category") if proj else "Featured"
+         proj_img = proj.get("image") if proj else None
+@@ -2489,6 +2867,64 @@ export const toolkit: ToolkitSkill[] = """
+                 self.ir["layout"],
+             )
+ 
++    def _verify_asset_invariants(self) -> dict[str, Any]:
++        """
++        Phase 2 Invariant Check:
++        Every generated local asset reference in JSX/CSS must resolve to an existing file in public/.
++        Reports every unresolved asset and any remote Framer URLs.
++        """
++        public_dir = self.output / "public"
++        asset_refs: set[str] = set()
++        remote_framer_urls: set[str] = set()
++
++        for ext in ("*.tsx", "*.ts", "*.css"):
++            for fpath in self.output.rglob(ext):
++                parts = [p.lower() for p in fpath.parts]
++                if "node_modules" in parts or ".next" in parts or "data" in parts or "analysis" in parts:
++                    continue
++                try:
++                    content = fpath.read_text(encoding="utf-8", errors="ignore")
++                except Exception:
++                    continue
++
++                # Scan for local public asset references (e.g. /images/..., /icons/..., /fonts/..., /videos/...)
++                for m in re.finditer(r'["\'](/(?:images|icons|fonts|videos|documents|audio)/[^"\'\s>]+)["\']', content):
++                    ref = m.group(1).split("?")[0].strip()
++                    if ref:
++                        asset_refs.add(ref)
++
++                # Scan for CSS url(/...)
++                for m in re.finditer(r'url\([\'"]?(/(?:images|icons|fonts|videos|documents|audio)/[^\'")\s>]+)[\'"]?\)', content):
++                    ref = m.group(1).split("?")[0].strip()
++                    if ref:
++                        asset_refs.add(ref)
++
++                # Scan for any remote Framer URLs
++                for m in re.finditer(r'https?://[^\s"\'\)\]>]*framerusercontent\.com[^\s"\'\)\]>]*', content):
++                    remote_framer_urls.add(m.group(0))
++
++        resolved_assets: list[str] = []
++        unresolved_assets: list[str] = []
++
++        for ref in sorted(asset_refs):
++            clean_rel = ref.lstrip("/")
++            file_path = public_dir / clean_rel
++            if file_path.exists():
++                resolved_assets.append(ref)
++            else:
++                unresolved_assets.append(ref)
++
++        report = {
++            "total_local_references": len(asset_refs),
++            "resolved_local_assets": resolved_assets,
++            "unresolved_assets": unresolved_assets,
++            "remote_framer_urls_remaining": sorted(remote_framer_urls),
++            "status": "PASS" if not unresolved_assets and not remote_framer_urls else "FAIL",
++        }
++
++        self._json("analysis/asset_verification.json", report)
++        return report
++
+ 
+     # ---------------------------------------------------------
+     # Helpers

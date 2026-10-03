@@ -28,6 +28,10 @@ class AssetDiscovery:
         discovered_map: dict[str, Asset] = {}
 
         # 1. Inspect captured network requests
+        captured_routes = set(capture.get("routes", []))
+        route_paths = {r.strip("/") for r in captured_routes}
+        base_domain = urlparse(effective_base).netloc if effective_base else ""
+
         for req in capture.get("requests", []):
             raw_url = req.get("url", "")
             if not raw_url or raw_url.startswith("data:") or raw_url.startswith("blob:"):
@@ -37,9 +41,16 @@ class AssetDiscovery:
             if not clean_url or clean_url in discovered_map:
                 continue
 
-            resource_type = req.get("resource_type", "")
-            asset_type = cls._resource_type_to_asset_type(resource_type, clean_url)
+            resource_type = (req.get("resource_type") or "").lower()
             parsed = urlparse(clean_url)
+
+            # Skip top-level HTML document navigations corresponding to site routes
+            if resource_type in ("document", "html"):
+                rel_path = parsed.path.strip("/")
+                if rel_path in route_paths or (parsed.netloc == base_domain and not Path(parsed.path).suffix):
+                    continue
+
+            asset_type = cls._resource_type_to_asset_type(resource_type, clean_url)
             filename = Path(parsed.path).name if parsed.path else "asset"
             ext = Path(filename).suffix.lstrip(".")
 

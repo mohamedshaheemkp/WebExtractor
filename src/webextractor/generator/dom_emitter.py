@@ -121,9 +121,13 @@ class DomToJsxEmitter:
         component_tree: dict[str, Any] | None = None,
         asset_bindings: list[dict[str, Any]] | None = None,
         motion_targets: set[str] | dict[str, Any] | list[str] | None = None,
+        assets: list[dict[str, Any]] | None = None,
+        asset_manifest: list[dict[str, Any]] | None = None,
     ):
         self.tree = component_tree or {}
         self.asset_bindings = asset_bindings or []
+        self.assets = assets or []
+        self.asset_manifest = asset_manifest or []
         self._binding_index = 0
         self.ambiguities: list[str] = []
         if isinstance(motion_targets, dict):
@@ -134,6 +138,75 @@ class DomToJsxEmitter:
             self.motion_targets = set(motion_targets)
         else:
             self.motion_targets = set()
+
+        # Multi-index lookup for fast local asset resolution
+        self._asset_lookup: dict[str, str] = {}
+        self._clean_asset_lookup: dict[str, str] = {}
+        self._filename_lookup: dict[str, str] = {}
+        self._base_filename_lookup: dict[str, str] = {}
+
+        # 1. Populate from asset_bindings
+        for b in self.asset_bindings:
+            if isinstance(b, dict):
+                loc = (b.get("local_path") or "").strip()
+                s_url = (b.get("source_url") or "").strip()
+                if loc:
+                    if s_url:
+                        self._asset_lookup[s_url] = loc
+                        clean_u = s_url.split("?")[0]
+                        if clean_u not in self._clean_asset_lookup:
+                            self._clean_asset_lookup[clean_u] = loc
+                    fname = loc.split("/")[-1].split("?")[0]
+                    if fname and fname not in self._filename_lookup:
+                        self._filename_lookup[fname] = loc
+                    base_fname = re.sub(r"@\d+", "", fname)
+                    if base_fname and base_fname not in self._base_filename_lookup:
+                        self._base_filename_lookup[base_fname] = loc
+                for v in b.get("variants", []):
+                    if isinstance(v, dict):
+                        v_loc = (v.get("local_path") or "").strip()
+                        v_src = (v.get("source_url") or "").strip()
+                        if v_loc:
+                            if v_src:
+                                self._asset_lookup[v_src] = v_loc
+                                c_v = v_src.split("?")[0]
+                                if c_v not in self._clean_asset_lookup:
+                                    self._clean_asset_lookup[c_v] = v_loc
+                            v_fname = v_loc.split("/")[-1].split("?")[0]
+                            if v_fname and v_fname not in self._filename_lookup:
+                                self._filename_lookup[v_fname] = v_loc
+                            v_base = re.sub(r"@\d+", "", v_fname)
+                            if v_base and v_base not in self._base_filename_lookup:
+                                self._base_filename_lookup[v_base] = v_loc
+
+        # 2. Fallback populate from assets and asset_manifest
+        all_manifest_items = list(self.asset_manifest) + list(self.assets)
+        for it in all_manifest_items:
+            if not isinstance(it, dict):
+                continue
+            src = (it.get("source") or it.get("url") or it.get("original_url") or "").strip()
+            loc = (it.get("local") or it.get("public_url") or "").strip()
+            if not loc and it.get("local_path"):
+                l_str = str(it.get("local_path")).replace("\\", "/")
+                if "public/" in l_str:
+                    loc = "/" + l_str.split("public/", 1)[1]
+                else:
+                    loc = l_str
+
+            downloaded = it.get("downloaded", True)
+            if loc and downloaded is not False:
+                if src:
+                    if src not in self._asset_lookup:
+                        self._asset_lookup[src] = loc
+                    clean_src = src.split("?")[0]
+                    if clean_src not in self._clean_asset_lookup:
+                        self._clean_asset_lookup[clean_src] = loc
+                fname = loc.split("/")[-1].split("?")[0]
+                if fname and fname not in self._filename_lookup:
+                    self._filename_lookup[fname] = loc
+                base_fname = re.sub(r"@\d+", "", fname)
+                if base_fname and base_fname not in self._base_filename_lookup:
+                    self._base_filename_lookup[base_fname] = loc
 
     # ------------------------------------------------------------------
     # Structural Section Decomposition (generic, platform-agnostic)
@@ -431,6 +504,8 @@ class DomToJsxEmitter:
                     av_str = "/" + clean_href[2:]
                 elif clean_href.startswith(".#"):
                     av_str = clean_href[1:]
+            elif tag == "video" and ak_lower == "poster":
+                av_str = self._resolve_single_url(av_str)
 
             tag_lower = tag.lower()
             if tag_lower in self.SVG_TAGS:
@@ -579,6 +654,14 @@ class DomToJsxEmitter:
                     if not is_static_center and any(m in v.lower() for m in ("translatey", "translate3d", "scale", "matrix")):
                         continue
 
+            # URL rewriting for CSS background images and patterns
+            if "url(" in v:
+                def _rewrite_css_url(m):
+                    raw_u = m.group(2).strip("'\"")
+                    resolved_u = self._resolve_single_url(raw_u)
+                    return f"url('{resolved_u}')"
+                v = re.sub(r'url\(([\'"]?)(.*?)\1\)', _rewrite_css_url, v)
+
             if k.startswith("--"):
                 entries.append(f'"{k}": "{v}"')
             else:
@@ -659,8 +742,34 @@ class DomToJsxEmitter:
                 return True
         return False
 
+    def _find_in_asset_lookup(self, url: str) -> str | None:
+        if not url or not isinstance(url, str):
+            return None
+        url = html.unescape(url.strip())
+        # 1. Exact URL match
+        if url in self._asset_lookup:
+            return self._asset_lookup[url]
+        # 2. Clean URL match (strip query-string parameters)
+        clean_url = url.split("?")[0]
+        if clean_url in self._clean_asset_lookup:
+            return self._clean_asset_lookup[clean_url]
+        # 3. Filename match
+        fname = clean_url.split("/")[-1]
+        if fname in self._filename_lookup:
+            return self._filename_lookup[fname]
+        # 4. Base filename match (without variant suffix @512, @1024, etc.)
+        base_name = re.sub(r"@\d+", "", fname)
+        if base_name in self._base_filename_lookup:
+            return self._base_filename_lookup[base_name]
+        return None
+
     def _resolve_image_src(self, node: dict[str, Any]) -> str | None:
-        """Resolves real downloaded local path for img elements from asset_bindings or node attributes."""
+        """
+        Resolves real downloaded local path for img elements:
+        1. asset_bindings lookup
+        2. site_ir.assets / asset manifest fallback (exact, clean, filename)
+        3. Only allow unresolved external URL if not downloaded locally
+        """
         raw_src = node.get("src") or node.get("attributes", {}).get("src")
         if not raw_src:
             attrs = node.get("attributes", {})
@@ -671,11 +780,27 @@ class DomToJsxEmitter:
                     raw_src = first_cand
 
         if raw_src and isinstance(raw_src, str):
+            raw_src = html.unescape(raw_src.strip())
+            clean_raw = raw_src.split("?")[0]
+
+            # 1. Check authoritative asset_bindings
             for b in self.asset_bindings:
-                if b.get("local_path") and (b.get("source_url") == raw_src or b.get("local_path") == raw_src):
-                    return b["local_path"]
-            if raw_src.startswith("/") or raw_src.startswith("http://") or raw_src.startswith("https://") or raw_src.startswith("data:"):
+                if b.get("local_path"):
+                    s_url = b.get("source_url", "")
+                    if s_url == raw_src or s_url.split("?")[0] == clean_raw or b.get("local_path") == raw_src:
+                        return b["local_path"]
+
+            # 2. Check site_ir.assets / asset manifest fallback
+            found_local = self._find_in_asset_lookup(raw_src)
+            if found_local:
+                return found_local
+
+            # 3. Check if already a local path or data URI
+            if (raw_src.startswith("/") and not raw_src.startswith("//")) or raw_src.startswith("data:"):
                 return raw_src
+
+            # 4. If remote and not in manifest at all, allow external URL
+            return raw_src
 
         img_bindings = [
             b["local_path"] for b in self.asset_bindings
@@ -700,20 +825,53 @@ class DomToJsxEmitter:
         return []
 
     def _resolve_single_url(self, url: str) -> str:
+        """Resolves an asset URL (e.g. from srcset or CSS) to local path."""
+        if not url or not isinstance(url, str):
+            return url
+        url = html.unescape(url.strip())
         clean_url = url.split("?")[0]
+
+        # 1. Check bindings
         for b in self.asset_bindings:
             s_url = b.get("source_url", "")
             if s_url == url or s_url.split("?")[0] == clean_url:
                 if b.get("local_path"):
                     return b["local_path"]
+
+        # 2. Check assets / manifest lookup
+        found = self._find_in_asset_lookup(url)
+        if found:
+            return found
+
+        # 3. If already local or data URI
+        if url.startswith("/") or url.startswith("data:"):
+            return url
+
         return url
 
     def _resolve_video_src(self, node: dict[str, Any]) -> str | None:
-        """Resolves real video source from asset_bindings."""
+        """Resolves real video source from asset_bindings or asset manifest."""
+        raw_src = node.get("src") or node.get("attributes", {}).get("src")
+        if raw_src and isinstance(raw_src, str):
+            raw_src = html.unescape(raw_src.strip())
+            clean_raw = raw_src.split("?")[0]
+            for b in self.asset_bindings:
+                if b.get("local_path") and (b.get("source_url") == raw_src or b.get("source_url", "").split("?")[0] == clean_raw):
+                    return b["local_path"]
+            found_local = self._find_in_asset_lookup(raw_src)
+            if found_local:
+                return found_local
+
         for b in self.asset_bindings:
             if b.get("role") == "video" and b.get("local_path"):
                 return b["local_path"]
-        return None
+
+        # Fallback to any local video in asset lookup
+        for src, loc in self._asset_lookup.items():
+            if any(loc.lower().endswith(ext) for ext in (".mp4", ".webm", ".ogv")):
+                return loc
+
+        return raw_src if isinstance(raw_src, str) else None
 
     @staticmethod
     def _escape_jsx_text(text: str) -> str:

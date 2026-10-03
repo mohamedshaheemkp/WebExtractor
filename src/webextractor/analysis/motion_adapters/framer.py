@@ -23,7 +23,9 @@ class FramerMotionAdapter(BaseMotionAdapter):
             or 'type="framer/appear"' in html
         )
 
-    def extract_motion(self, html: str, css: str = "") -> dict[str, Any]:
+    def extract_motion(
+        self, html: str, css: str = "", claimed_targets: set[str] | None = None
+    ) -> dict[str, Any]:
         appear_animations: dict[str, Any] = {}
         has_cursor = False
         has_time_component = False
@@ -106,6 +108,7 @@ class FramerMotionAdapter(BaseMotionAdapter):
                                     "trigger": "mount",
                                     "target": f'[data-framer-appear-id="{appear_id}"]',
                                     "id": appear_id,
+                                    "adapter": "framer",
                                     "initial": initial,
                                     "animate": clean_animate,
                                     "transition": transition,
@@ -163,6 +166,7 @@ class FramerMotionAdapter(BaseMotionAdapter):
                     "trigger": "mount",
                     "target": f'[data-framer-appear-id="{appear_id}"]',
                     "id": appear_id,
+                    "adapter": "framer",
                     "initial": initial_cfg,
                     "animate": {"opacity": 1, "y": 0},
                     "transition": trans_cfg,

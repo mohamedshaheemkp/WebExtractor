@@ -125,4 +125,10 @@ class SnapshotWriter:
                 encoding="utf-8",
             )
 
+        if capture.get("overlay"):
+            (snapshot_dir / "overlay.json").write_text(
+                json.dumps(capture["overlay"], indent=2),
+                encoding="utf-8",
+            )
+
         return snapshot_dir

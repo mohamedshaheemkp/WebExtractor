@@ -43,6 +43,8 @@ class ReactProjectGenerator:
         self.emitter = DomToJsxEmitter(
             component_tree=self.ir.get("components"),
             asset_bindings=self.ir.get("asset_bindings", []),
+            assets=self.ir.get("assets", []),
+            asset_manifest=self.ir.get("asset_manifest", []),
             motion_targets=motion_targets,
         )
 
@@ -60,6 +62,7 @@ class ReactProjectGenerator:
         self._write_not_found_page()
         self._write_data()
         self._write_analysis()
+        self._verify_asset_invariants()
 
         return self.output
 
@@ -218,9 +221,13 @@ export default nextConfig;
             layout_imports.append('import RouteTransition from "../components/RouteTransition";')
             layout_elements.append("        <RouteTransition />")
 
-        if has_cursor:
-            layout_imports.append('import CursorRuntime, { CursorFollower } from "../components/CursorRuntime";')
-            layout_elements.append("        <CursorRuntime />")
+        # Always include NavigationOverlay for full responsive navigation
+        layout_imports.append('import NavigationOverlay from "../components/NavigationOverlay";')
+        layout_elements.append("        <NavigationOverlay />")
+
+        # Always include CursorRuntime (self-guards to @media (hover: hover) and (pointer: fine))
+        layout_imports.append('import CursorRuntime, { CursorFollower } from "../components/CursorRuntime";')
+        layout_elements.append("        <CursorRuntime />")
 
         imports_str = "\n".join(layout_imports)
         elements_str = "\n".join(layout_elements)
@@ -675,10 +682,12 @@ code, pre, kbd {
   font-family: var(--font-mono, ui-monospace, monospace);
 }
 
-/* Custom Cursor Native Suppression */
-body.has-custom-cursor,
-body.has-custom-cursor * {
-  cursor: none !important;
+/* Custom Cursor Native Suppression (desktop fine pointer only) */
+@media (hover: hover) and (pointer: fine) {
+  body.has-custom-cursor,
+  body.has-custom-cursor * {
+    cursor: none !important;
+  }
 }
 
 /* Responsive fallback for single-variant SSR sections: prevent desktop-only capture from vanishing on viewports < 1440px */
@@ -1109,7 +1118,7 @@ export default function MotionRuntime({
     }
 
     // Safe element finder: handles IDs starting with numbers and arbitrary strings without CSS selector errors
-    const findTarget = (targetId: string): HTMLElement | null => {
+    const findTarget = (targetId: string): Element | null => {
       if (!targetId) return null;
       const byId = document.getElementById(targetId);
       if (byId) return byId;
@@ -1118,13 +1127,13 @@ export default function MotionRuntime({
         const el = document.querySelector(
           `[data-motion-id="${targetId}"], [data-framer-appear-id="${targetId}"], [id="${targetId}"]`
         );
-        if (el instanceof HTMLElement) return el;
+        if (el instanceof Element) return el;
       } catch {}
 
       try {
         const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(targetId) : targetId;
         const el = document.querySelector(`.motion-${escaped}`);
-        if (el instanceof HTMLElement) return el;
+        if (el instanceof Element) return el;
       } catch {}
 
       return null;
@@ -1132,11 +1141,16 @@ export default function MotionRuntime({
 
     const defaultTimingFunction = (animations && (animations.timing_function || animations.default_timing_function || animations.default_easing)) || "cubic-bezier(0.25, 0.1, 0.25, 1)";
 
+    // Track bound elements to ensure each DOM node is bound at most once
+    const boundElements = new Set<Element>();
+
     // 1. Process Appear / Motion Configs
     Object.entries(appearMap).forEach(([targetId, config]) => {
       const el = findTarget(targetId);
-      if (!el) return;
+      if (!el || boundElements.has(el)) return;
+      boundElements.add(el);
 
+      const htmlEl = el instanceof HTMLElement ? el : null;
       const initial = config.initial || {};
       const animate = config.animate || {};
       const hover = config.hover || {};
@@ -1152,6 +1166,18 @@ export default function MotionRuntime({
       const initOpacity = initial.opacity !== undefined ? initial.opacity : 1;
       const targetOpacity = animate.opacity !== undefined ? animate.opacity : 1;
 
+      // Final visible state guarantee
+      const ensureFinalVisibleState = () => {
+        if (htmlEl) {
+          htmlEl.style.opacity = `${targetOpacity}`;
+          if (targetTransform && targetTransform !== "translate3d(0px, 0px, 0) scale(1) rotate(0deg)") {
+            htmlEl.style.transform = targetTransform;
+          } else {
+            htmlEl.style.transform = "";
+          }
+        }
+      };
+
       const runEntranceAnimation = () => {
         try {
           const keyframes = config.keyframes || [
@@ -1160,17 +1186,18 @@ export default function MotionRuntime({
           ];
           const easing = transition.timing_function || transition.easing || transition.ease || defaultTimingFunction || (transition.type === "spring" ? "cubic-bezier(0.16, 1, 0.3, 1)" : "cubic-bezier(0.25, 0.1, 0.25, 1)");
           const anim = el.animate(keyframes, {
-            duration: durationMs,
+            duration: Math.max(durationMs, 10),
             delay: delayMs,
             easing: easing,
-            fill: "both",
+            fill: "forwards",
             iterations: isContinuous ? Infinity : 1,
             direction: isContinuous ? (config.direction || "normal") : "normal",
           });
+          anim.onfinish = () => ensureFinalVisibleState();
+          anim.oncancel = () => ensureFinalVisibleState();
           return anim;
         } catch (err) {
-          el.style.transform = targetTransform;
-          el.style.opacity = `${targetOpacity}`;
+          ensureFinalVisibleState();
         }
       };
 
@@ -1184,16 +1211,19 @@ export default function MotionRuntime({
               if (entry.isIntersecting) {
                 runEntranceAnimation();
                 if (once) observer.unobserve(el);
-              } else if (!once) {
-                el.style.opacity = `${initOpacity}`;
-                el.style.transform = initTransform;
               }
             });
           },
           { threshold: config.threshold || 0.15 }
         );
         observer.observe(el);
-        cleanupFns.push(() => observer.disconnect());
+        // Fallback: ensure elements never remain permanently hidden if observer never triggers
+        const fallbackTimer = setTimeout(ensureFinalVisibleState, 3000);
+        cleanupFns.push(() => {
+          clearTimeout(fallbackTimer);
+          observer.disconnect();
+          ensureFinalVisibleState();
+        });
       } else {
         runEntranceAnimation();
       }
@@ -1826,77 +1856,372 @@ export default function RouteTransition() {
             "components/CursorRuntime.tsx",
             """\"use client\";
 
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 
 export function CursorFollower() {
   return null;
 }
 
 export default function CursorRuntime() {
-  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
-  const [isHovered, setIsHovered] = useState(false);
-  const [hoverText, setHoverText] = useState("");
-  const [visible, setVisible] = useState(false);
+  const cursorRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
-    // Suppress native cursor while custom cursor is active
+    // 1. Desktop fine-pointer guard: disable custom cursor on touch/mobile
+    if (typeof window === "undefined") return;
+    const mediaQuery = window.matchMedia("(hover: hover) and (pointer: fine)");
+    if (!mediaQuery.matches) {
+      // Touch/mobile device: native cursor remains active, suppression class is never added
+      return;
+    }
+
+    const cursor = cursorRef.current;
+    const textEl = textRef.current;
+    if (!cursor) return;
+
+    // Suppress native cursor on fine-pointer devices
     document.body.classList.add("has-custom-cursor");
 
-    const onMove = (e: MouseEvent) => {
-      setPos({ x: e.clientX, y: e.clientY });
-      setVisible(true);
+    let mouseX = -100;
+    let mouseY = -100;
+    let isVisible = false;
+    let isHovering = false;
+    let currentLabel = "";
+    let rafId: number | null = null;
 
-      const target = e.target as HTMLElement | null;
-      if (target) {
-        const interactive = target.closest("a, button, [role='button'], .project-card, [data-cursor]");
-        if (interactive) {
-          setIsHovered(true);
-          const customText = interactive.getAttribute("data-cursor") || (interactive.classList.contains("project-card") ? "VIEW" : "");
-          setHoverText(customText);
+    const render = () => {
+      if (!cursor) return;
+      if (!isVisible) {
+        cursor.style.opacity = "0";
+      } else {
+        cursor.style.opacity = "1";
+        cursor.style.left = `${mouseX}px`;
+        cursor.style.top = `${mouseY}px`;
+
+        if (isHovering && currentLabel) {
+          cursor.style.width = "72px";
+          cursor.style.height = "72px";
+          cursor.style.borderRadius = "50%";
+          cursor.style.backgroundColor = "#ffffff";
+          cursor.style.mixBlendMode = "normal";
+          cursor.style.color = "#000000";
+          if (textEl) {
+            textEl.textContent = currentLabel;
+            textEl.style.display = "block";
+          }
         } else {
-          setIsHovered(false);
-          setHoverText("");
+          cursor.style.width = "16px";
+          cursor.style.height = "16px";
+          cursor.style.borderRadius = "50%";
+          cursor.style.backgroundColor = "#ffffff";
+          cursor.style.mixBlendMode = "difference";
+          cursor.style.color = "transparent";
+          if (textEl) {
+            textEl.textContent = "";
+            textEl.style.display = "none";
+          }
         }
+      }
+      rafId = null;
+    };
+
+    const requestRender = () => {
+      if (rafId === null) {
+        rafId = requestAnimationFrame(render);
       }
     };
 
-    const onLeave = () => setVisible(false);
+    const onMouseMove = (e: MouseEvent) => {
+      mouseX = e.clientX;
+      mouseY = e.clientY;
+      isVisible = true;
 
-    window.addEventListener("mousemove", onMove);
-    document.body.addEventListener("mouseleave", onLeave);
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const hoverTarget = target.closest(
+          "[data-framer-cursor], [data-cursor], a[href*='/work/'], a[href*='/motion/'], .project-card, [data-highlight]"
+        );
+        if (hoverTarget) {
+          isHovering = true;
+          currentLabel =
+            hoverTarget.getAttribute("data-framer-cursor") ||
+            hoverTarget.getAttribute("data-cursor") ||
+            "VIEW";
+        } else {
+          isHovering = false;
+          currentLabel = "";
+        }
+      }
+      requestRender();
+    };
+
+    const onMouseLeave = () => {
+      isVisible = false;
+      requestRender();
+    };
+
+    const onMouseEnter = () => {
+      isVisible = true;
+      requestRender();
+    };
+
+    window.addEventListener("mousemove", onMouseMove, { passive: true });
+    document.addEventListener("mouseleave", onMouseLeave);
+    document.addEventListener("mouseenter", onMouseEnter);
+
     return () => {
       document.body.classList.remove("has-custom-cursor");
-      window.removeEventListener("mousemove", onMove);
-      document.body.removeEventListener("mouseleave", onLeave);
+      window.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseleave", onMouseLeave);
+      document.removeEventListener("mouseenter", onMouseEnter);
+      if (rafId !== null) cancelAnimationFrame(rafId);
     };
   }, []);
 
-  if (!pos || !visible) return null;
-
   return (
     <div
+      ref={cursorRef}
       id="custom-cursor"
+      aria-hidden="true"
       style={{
         position: "fixed",
-        top: pos.y,
-        left: pos.x,
-        transform: `translate(-50%, -50%) scale(${isHovered ? 2.2 : 1})`,
-        width: isHovered && hoverText ? 36 : 14,
-        height: isHovered && hoverText ? 36 : 14,
+        top: -100,
+        left: -100,
+        width: 16,
+        height: 16,
         borderRadius: "50%",
-        backgroundColor: isHovered ? "rgba(255, 255, 255, 0.9)" : "var(--token-cursor, #ffffff)",
-        color: "#000000",
+        backgroundColor: "#ffffff",
+        mixBlendMode: "difference",
+        transform: "translate(-50%, -50%)",
+        pointerEvents: "none",
+        zIndex: 999999,
+        opacity: 0,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        fontSize: "8px",
-        fontWeight: "bold",
-        pointerEvents: "none",
-        zIndex: 9999,
-        transition: "transform 0.15s ease-out, width 0.2s ease, height 0.2s ease, opacity 0.2s ease",
+        fontSize: "11px",
+        fontWeight: 700,
+        letterSpacing: "0.05em",
+        textTransform: "uppercase",
+        transition:
+          "width 0.22s cubic-bezier(0.16, 1, 0.3, 1), height 0.22s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, opacity 0.2s ease",
       }}
     >
-      {isHovered && hoverText ? hoverText : null}
+      <span ref={textRef} style={{ display: "none", userSelect: "none" }} />
+    </div>
+  );
+}
+""",
+        )
+
+        # 8. NavigationOverlay.tsx (Evidence-driven responsive navigation overlay)
+        self._text(
+            "components/NavigationOverlay.tsx",
+            """\"use client\";
+
+import React, { useState, useEffect } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+
+export default function NavigationOverlay() {
+  const [isOpen, setIsOpen] = useState(false);
+  const pathname = usePathname();
+
+  // Close overlay on route navigation
+  useEffect(() => {
+    setIsOpen(false);
+  }, [pathname]);
+
+  // Wire hamburger toggle click (.framer-zecFa, [aria-label*="menu"], etc.)
+  useEffect(() => {
+    const handleTriggerClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      const trig = target.closest(
+        ".framer-zecFa, [data-framer-name='Menu'], button[aria-label*='menu' i], [data-menu-trigger]"
+      );
+      if (trig) {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsOpen((prev) => !prev);
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setIsOpen(false);
+      }
+    };
+
+    document.addEventListener("click", handleTriggerClick);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("click", handleTriggerClick);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      id="overlay"
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 99999,
+        backgroundColor: "#000000",
+        color: "#ffffff",
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "space-between",
+        padding: "40px 32px",
+        overflowY: "auto",
+        transition: "opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
+      }}
+    >
+      {/* Top Bar */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          width: "100%",
+        }}
+      >
+        <div style={{ fontFamily: "var(--font-mono, monospace)", fontSize: "14px", opacity: 0.8 }}>
+          LOCAL/ <span style={{ color: "#ffffff" }}>46° 28' 58.6272\\" N</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
+          <Link
+            href="/contact"
+            onClick={() => setIsOpen(false)}
+            style={{
+              padding: "10px 24px",
+              borderRadius: "60px",
+              border: "1px solid #333333",
+              backgroundColor: "transparent",
+              color: "#ffffff",
+              textDecoration: "none",
+              fontFamily: "var(--font-display, inherit)",
+              fontSize: "12px",
+              fontWeight: 600,
+              letterSpacing: "0.1em",
+              textTransform: "uppercase",
+            }}
+          >
+            CONTACT NOW
+          </Link>
+          {/* Close button */}
+          <button
+            type="button"
+            aria-label="Close Navigation"
+            onClick={() => setIsOpen(false)}
+            style={{
+              width: "48px",
+              height: "48px",
+              borderRadius: "50%",
+              backgroundColor: "rgb(107, 107, 107)",
+              border: "none",
+              color: "#000000",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              transform: "rotate(45deg)",
+              transition: "transform 0.2s ease",
+            }}
+          >
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M6 12h12M12 6v12" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* Center Navigation Links */}
+      <nav
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "20px",
+          margin: "60px 0",
+        }}
+      >
+        {[
+          { label: "Home", href: "/" },
+          { label: "Work", href: "/work" },
+          { label: "DESIGNS", href: "/designs" },
+          { label: "MOTION", href: "/motion" },
+          { label: "Contact", href: "/contact" },
+        ].map((item) => {
+          const isActive = pathname === item.href || (item.href !== "/" && pathname?.startsWith(item.href));
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              onClick={() => setIsOpen(false)}
+              style={{
+                fontFamily: "var(--font-display, inherit)",
+                fontSize: "clamp(36px, 6vw, 64px)",
+                fontWeight: 700,
+                textDecoration: "none",
+                color: isActive ? "rgb(128, 128, 128)" : "#ffffff",
+                transition: "color 0.2s ease, transform 0.2s ease",
+              }}
+            >
+              {item.label}
+            </Link>
+          );
+        })}
+      </nav>
+
+      {/* Bottom Bar: Copyright & Social Links */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: "20px",
+          borderTop: "1px solid rgb(22, 22, 22)",
+          paddingTop: "24px",
+          width: "100%",
+        }}
+      >
+        <p style={{ fontFamily: "var(--font-body, inherit)", fontSize: "14px", opacity: 0.7, margin: 0 }}>
+          ©2024 All RIGHTS Reserved
+        </p>
+        <div style={{ display: "flex", gap: "24px" }}>
+          {[
+            { name: "Instagram", url: "https://www.instagram.com/" },
+            { name: "Dribbble", url: "https://dribbble.com/" },
+            { name: "Twitter", url: "https://x.com/MandroDesign" },
+          ].map((s) => (
+            <a
+              key={s.name}
+              href={s.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                color: "#ffffff",
+                textDecoration: "none",
+                fontFamily: "var(--font-display, inherit)",
+                fontSize: "14px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "4px",
+                opacity: 0.8,
+              }}
+            >
+              <span>{s.name}</span>
+              <span style={{ transform: "rotate(45deg)", display: "inline-block", fontSize: "12px" }}>↑</span>
+            </a>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1916,6 +2241,7 @@ export default function CursorRuntime() {
         )
 
         has_work_routes = False
+        has_work_index = False
         has_contact_route = False
 
         for route in routes:
@@ -1927,24 +2253,28 @@ export default function CursorRuntime() {
             if clean_route == "/contact":
                 has_contact_route = True
                 self._write_contact_page()
+            elif clean_route == "/work":
+                has_work_index = True
+                self._write_work_index_page()
             elif clean_route.startswith("/work/"):
                 has_work_routes = True
                 self._write_work_page(clean_route)
+            elif clean_route in ("/404", "/not-found"):
+                # Handled by _write_not_found_page
+                pass
             else:
                 self._write_custom_page(clean_route)
 
-        # Generate work pages from data if data['projects'] exists or work routes were found
+        # Generate work pages from data if data['projects'] exists
         projects = self.ir.get("data", {}).get("projects", [])
-        if projects or has_work_routes or any(r == "/work" or r.startswith("/work/") for r in routes):
-            for p in projects:
-                slug = p.get("slug")
-                if slug:
-                    self._write_work_page(f"/work/{slug}")
-            self._write_work_dynamic_page()
-            self._write_work_index_page()
+        for p in projects:
+            slug = p.get("slug")
+            if slug:
+                self._write_work_page(f"/work/{slug}")
 
-        if has_contact_route or "/contact" in routes:
-            self._write_contact_page()
+        self._write_work_dynamic_page()
+        if not has_work_index and (has_work_routes or projects or any(r == "/work" or r.startswith("/work/") for r in routes)):
+            self._write_work_index_page()
 
     def _write_home_page(self):
         pages = self.ir.get("pages", [])
@@ -2120,6 +2450,30 @@ export default function WorkIndexPage() {{
         footer_tag = f"      <{footer_name} />\n" if footer_name else ""
 
         projects = self.ir.get("data", {}).get("projects", [])
+        if not projects:
+            # Honest pipeline notice: never silently fabricate fake cards
+            self._text(
+                "app/work/page.tsx",
+                f"""import React from "react";
+{nav_import}{footer_import}
+export default function WorkIndexPage() {{
+  return (
+    <main>
+{nav_tag}      <section style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "60vh" }}}}>
+        <h1 style={{{{ fontFamily: "var(--font-display)", fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 700 }}}}>
+          Work
+        </h1>
+        <p style={{{{ opacity: 0.6, marginTop: "16px" }}}}>
+          Pipeline Notice: Route /work was not captured from source evidence.
+        </p>
+      </section>
+{footer_tag}    </main>
+  );
+}}
+""",
+            )
+            return
+
         project_cards = []
         for p in projects:
             slug = p.get("slug") or self._slugify(p.get("title", ""))
@@ -2242,6 +2596,30 @@ export default function WorkPage() {{
 
         projects = self.ir.get("data", {}).get("projects", [])
         proj = next((p for p in projects if p.get("slug") == slug or self._slugify(p.get("title", "")) == slug), None)
+
+        if not proj:
+            # Honest pipeline notice: never silently fabricate fake content
+            self._text(
+                f"app/work/{slug}/page.tsx",
+                f"""import React from "react";
+{nav_import}{footer_import}
+export default function WorkPage() {{
+  return (
+    <main>
+{nav_tag}      <section style={{{{ maxWidth: "1200px", margin: "0 auto", padding: "120px 24px 80px", minHeight: "60vh" }}}}>
+        <h1 style={{{{ fontFamily: "var(--font-display)", fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 700 }}}}>
+          {title}
+        </h1>
+        <p style={{{{ opacity: 0.6, marginTop: "16px" }}}}>
+          Pipeline Notice: Route {route} was not captured from source evidence.
+        </p>
+      </section>
+{footer_tag}    </main>
+  );
+}}
+""",
+            )
+            return
 
         proj_title = proj.get("title") if proj else title
         proj_cat = proj.get("category") if proj else "Featured"
@@ -2488,6 +2866,64 @@ export const toolkit: ToolkitSkill[] = """
                 "analysis/layout.json",
                 self.ir["layout"],
             )
+
+    def _verify_asset_invariants(self) -> dict[str, Any]:
+        """
+        Phase 2 Invariant Check:
+        Every generated local asset reference in JSX/CSS must resolve to an existing file in public/.
+        Reports every unresolved asset and any remote Framer URLs.
+        """
+        public_dir = self.output / "public"
+        asset_refs: set[str] = set()
+        remote_framer_urls: set[str] = set()
+
+        for ext in ("*.tsx", "*.ts", "*.css"):
+            for fpath in self.output.rglob(ext):
+                parts = [p.lower() for p in fpath.parts]
+                if "node_modules" in parts or ".next" in parts or "data" in parts or "analysis" in parts:
+                    continue
+                try:
+                    content = fpath.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+
+                # Scan for local public asset references (e.g. /images/..., /icons/..., /fonts/..., /videos/...)
+                for m in re.finditer(r'["\'](/(?:images|icons|fonts|videos|documents|audio)/[^"\'\s>]+)["\']', content):
+                    ref = m.group(1).split("?")[0].strip()
+                    if ref:
+                        asset_refs.add(ref)
+
+                # Scan for CSS url(/...)
+                for m in re.finditer(r'url\([\'"]?(/(?:images|icons|fonts|videos|documents|audio)/[^\'")\s>]+)[\'"]?\)', content):
+                    ref = m.group(1).split("?")[0].strip()
+                    if ref:
+                        asset_refs.add(ref)
+
+                # Scan for any remote Framer URLs
+                for m in re.finditer(r'https?://[^\s"\'\)\]>]*framerusercontent\.com[^\s"\'\)\]>]*', content):
+                    remote_framer_urls.add(m.group(0))
+
+        resolved_assets: list[str] = []
+        unresolved_assets: list[str] = []
+
+        for ref in sorted(asset_refs):
+            clean_rel = ref.lstrip("/")
+            file_path = public_dir / clean_rel
+            if file_path.exists():
+                resolved_assets.append(ref)
+            else:
+                unresolved_assets.append(ref)
+
+        report = {
+            "total_local_references": len(asset_refs),
+            "resolved_local_assets": resolved_assets,
+            "unresolved_assets": unresolved_assets,
+            "remote_framer_urls_remaining": sorted(remote_framer_urls),
+            "status": "PASS" if not unresolved_assets and not remote_framer_urls else "FAIL",
+        }
+
+        self._json("analysis/asset_verification.json", report)
+        return report
 
 
     # ---------------------------------------------------------

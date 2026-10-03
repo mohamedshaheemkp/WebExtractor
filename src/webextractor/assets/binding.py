@@ -90,9 +90,12 @@ class AssetBindingEngine:
         asset_manifest: list[dict[str, Any]],
         page_components: list[dict[str, Any]] | list[str],
         reusable_components: list[dict[str, Any]],
+        pages: list[dict[str, Any]] | None = None,
+        overlay: dict[str, Any] | None = None,
     ) -> list[AssetBinding]:
         """
         Creates a deterministic list of AssetBindings linking components to local assets.
+        Traverses primary rendered DOM, responsive viewports, all captured subpages, and overlay.
         """
         bindings: list[AssetBinding] = []
 
@@ -110,6 +113,29 @@ class AssetBindingEngine:
         # Extract bindings from Mobile DOM (if different or specifically mobile)
         if mobile_dom and mobile_dom != desktop_dom:
             self._extract_subtree_bindings(mobile_dom, manifest_map, bindings, breakpoint="mobile")
+
+        # Extract bindings from all captured subpages
+        if pages:
+            for page in pages:
+                p_route = page.get("route", "")
+                p_slug = page.get("slug") or (p_route.strip("/").replace("/", "_") if p_route else "Page")
+                p_comp = "".join(part.capitalize() for part in re.split(r"[^a-zA-Z0-9]", p_slug)) or "Page"
+                p_dom = page.get("dom") or page.get("rendered_dom") or page.get("dom_snapshot")
+                if p_dom and p_dom != desktop_dom and p_dom != mobile_dom:
+                    self._extract_subtree_bindings(p_dom, manifest_map, bindings, breakpoint=None, current_component=p_comp)
+
+                # Also traverse page-specific viewport DOMs if present
+                p_vps = page.get("viewports", {})
+                if isinstance(p_vps, dict):
+                    for vp_name, vp_data in p_vps.items():
+                        if isinstance(vp_data, dict):
+                            vp_dom = vp_data.get("dom")
+                            if vp_dom and vp_dom != p_dom and vp_dom != desktop_dom:
+                                self._extract_subtree_bindings(vp_dom, manifest_map, bindings, breakpoint=vp_name, current_component=p_comp)
+
+        # Extract bindings from navigation overlay DOM if present
+        if overlay:
+            self._extract_subtree_bindings(overlay, manifest_map, bindings, breakpoint=None, current_component="NavigationOverlay")
 
         # Ensure page components without extracted DOM images receive appropriate manifest assignments if available
         self._assign_fallback_bindings(bindings, asset_manifest, page_components, reusable_components)

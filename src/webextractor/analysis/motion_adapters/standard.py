@@ -23,8 +23,25 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
     """
 
     def can_handle(self, html: str, css: str = "") -> bool:
-        # Standard adapter runs universally on any website
-        return True
+        if not html and not css:
+            return False
+        has_css = bool(
+            css
+            and (
+                "@keyframes" in css
+                or "transition" in css
+                or "animation" in css
+            )
+        )
+        has_html = bool(
+            html
+            and (
+                "data-aos" in html
+                or "data-motion" in html
+                or re.search(r"\b\d{2}:\d{2}:\d{2}\b", html)
+            )
+        )
+        return has_css or has_html
 
     @staticmethod
     def _parse_transition_clause(clause: str) -> tuple[float | None, str | None, float | None]:
@@ -53,7 +70,9 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
 
         return dur_val, tf_val, delay_val
 
-    def extract_motion(self, html: str, css: str = "") -> dict[str, Any]:
+    def extract_motion(
+        self, html: str, css: str = "", claimed_targets: set[str] | None = None
+    ) -> dict[str, Any]:
         keyframes: list[dict[str, Any]] = []
         motion_triggers: list[dict[str, Any]] = []
         has_time_component = False
@@ -168,6 +187,8 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
 
                     if dur_val is not None or tf_val is not None:
                         clean_sel = sel.split(",")[0].strip()
+                        if claimed_targets and any(ct in clean_sel for ct in claimed_targets):
+                            continue
                         resolved_dur = dur_val if dur_val is not None else default_duration
                         resolved_tf = tf_val or default_easing
                         entry = {
@@ -193,9 +214,12 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
                 duration = el.get("data-aos-duration", "800")
                 classes = el.get("class", [])
                 target = "." + ".".join(classes[:2]) if classes else el.name
+                if claimed_targets and (target in claimed_targets or any(c in claimed_targets for c in classes)):
+                    continue
                 motion_triggers.append({
                     "trigger": "in_view",
                     "target": target,
+                    "adapter": "standard",
                     "effect": effect,
                     "transition": {
                         "delay": float(delay) / 1000.0 if delay.isdigit() else 0.0,
