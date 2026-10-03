@@ -318,7 +318,7 @@ class TestValidationEngine(unittest.TestCase):
         self.assertEqual(unaligned["status"], "FAIL")
         self.assertGreater(unaligned["divergence_score"], 5.0)
 
-        # With phase detection: detects offset of +10px, aligns, and passes
+        # With phase detection: detects offset of +10px, aligns and reports diagnostics without masking raw threshold
         aligned = ScreenshotComparator.compare_region(
             (w, h, buf1_pixels),
             (w, h, buf2_pixels),
@@ -330,8 +330,9 @@ class TestValidationEngine(unittest.TestCase):
         self.assertTrue(aligned.get("phase_difference_detected"))
         self.assertEqual(aligned.get("phase_offset_px"), -10)
         self.assertLessEqual(aligned.get("phase_aligned_divergence", 100), 5.0)
-        self.assertEqual(aligned["status"], "PASS")
-        self.assertFalse(aligned["flagged"])
+        # Threshold is not weakened: raw status is still FAIL/flagged because raw divergence > threshold
+        self.assertEqual(aligned["status"], "FAIL")
+        self.assertTrue(aligned["flagged"])
         # Crucial: raw divergence is preserved for reporting
         self.assertGreater(aligned["divergence_score"], 5.0)
 

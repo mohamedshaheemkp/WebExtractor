@@ -440,9 +440,6 @@ class ScreenshotComparator:
                 phase_offset = best_s
                 phase_aligned_div = best_div
                 phase_aligned_sim = best_sim
-                if best_div <= threshold:
-                    flagged = False
-                    status = "PASS"
 
         result_payload: dict[str, Any] = {
             "status": status,

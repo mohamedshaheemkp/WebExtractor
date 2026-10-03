@@ -149,6 +149,42 @@ class TestStaticGenerator(unittest.TestCase):
         self.assertIn("track.animate", app_js)
         self.assertIn("translateX", app_js)
 
+    def test_marquee_initial_transform_resting_phase_preserved(self):
+        """Validates that continuous marquee initial resting transform (translateX(0px)) is preserved in static HTML."""
+        custom_ir = dict(self.mock_ir)
+        custom_ir["pages"] = [
+            {
+                "route": "/",
+                "title": "Home",
+                "dom": {
+                    "tag": "section",
+                    "attributes": {
+                        "style": "overflow: hidden; mask-image: linear-gradient(to right, rgba(0,0,0,0), #000);",
+                    },
+                    "children": [
+                        {
+                            "tag": "ul",
+                            "attributes": {
+                                "style": "display: flex; flex-direction: row; gap: 20px; will-change: auto; transform: translateX(0px);",
+                            },
+                            "children": [
+                                {"tag": "li", "attributes": {"style": "width: 240px; height: 180px;"}, "children": []},
+                                {"tag": "li", "attributes": {"style": "width: 240px; height: 180px;"}, "children": []},
+                            ],
+                        }
+                    ],
+                },
+            }
+        ]
+
+        generator = StaticProjectGenerator(custom_ir, self.out_path)
+        generator.generate()
+
+        index_html = (self.out_path / "index.html").read_text(encoding="utf-8")
+        self.assertIn("transform: translateX(0px)", index_html)
+        self.assertIn("flex-direction: row", index_html)
+
 
 if __name__ == "__main__":
     unittest.main()
+
