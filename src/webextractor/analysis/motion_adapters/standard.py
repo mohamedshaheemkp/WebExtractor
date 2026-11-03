@@ -21,24 +21,25 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
     Generic platform-agnostic motion adapter.
     Extracts CSS keyframes, CSS animation declarations, and standard data-motion/data-aos attributes.
     """
+    name: str = "standard"
 
     def can_handle(self, html: str, css: str = "") -> bool:
         if not html and not css:
             return False
-        has_css = bool(
-            css
-            and (
-                "@keyframes" in css
-                or "transition" in css
-                or "animation" in css
-            )
-        )
+        has_css = False
+        if css:
+            if "@keyframes" in css or "animation" in css:
+                has_css = True
+            elif "transition" in css:
+                # Require non-hover/focus transition declarations
+                css_no_hover = re.sub(r":[a-zA-Z-]*\s*\{[^}]*\}", "", css)
+                if "transition" in css_no_hover:
+                    has_css = True
         has_html = bool(
             html
             and (
                 "data-aos" in html
                 or "data-motion" in html
-                or re.search(r"\b\d{2}:\d{2}:\d{2}\b", html)
             )
         )
         return has_css or has_html
@@ -187,7 +188,7 @@ class StandardCssMotionAdapter(BaseMotionAdapter):
 
                     if dur_val is not None or tf_val is not None:
                         clean_sel = sel.split(",")[0].strip()
-                        if claimed_targets and any(ct in clean_sel for ct in claimed_targets):
+                        if claimed_targets and (clean_sel in claimed_targets or any(ct == clean_sel for ct in claimed_targets)):
                             continue
                         resolved_dur = dur_val if dur_val is not None else default_duration
                         resolved_tf = tf_val or default_easing

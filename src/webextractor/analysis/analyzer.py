@@ -523,8 +523,14 @@ class SiteAnalyzer:
                         animations["ease"] = resolved_tf
 
             # 4. Propagate into appear_animations (Requirement 6)
+            # Deduplicate framer_appear_id and motion_id (precedence: framer_appear_id > motion_id)
+            if framer_appear_id and motion_id:
+                motion_id = None
+                if "data-motion-id" in attrs:
+                    del attrs["data-motion-id"]
+            motion_key = framer_appear_id or motion_id
             appear = animations.setdefault("appear_animations", {})
-            candidate_ids = [framer_appear_id, motion_id, target_id, node_id]
+            candidate_ids = [motion_key, target_id, node_id] if motion_key else [target_id, node_id]
             for cid in candidate_ids:
                 if cid and cid in appear:
                     appear[cid].setdefault("transition", {})
@@ -556,8 +562,7 @@ class SiteAnalyzer:
                 trg_target = trg.get("target", "")
                 trg_id = trg.get("id")
                 matches = (
-                    (framer_appear_id and (framer_appear_id == trg_id or framer_appear_id in trg_target))
-                    or (motion_id and (motion_id == trg_id or motion_id in trg_target))
+                    (motion_key and (motion_key == trg_id or motion_key in trg_target))
                     or (node_id and f"#{node_id}" in trg_target)
                     or (target_sel and target_sel == trg_target)
                 )
@@ -572,11 +577,8 @@ class SiteAnalyzer:
                         trg["transition"]["duration"] = round(dur_val, 2)
 
             # Do not append appear animations to motion_triggers if they already exist in appear_animations
-            already_in_appear = (
-                (framer_appear_id and framer_appear_id in appear)
-                or (motion_id and motion_id in appear)
-            )
-            if not trigger_updated and not already_in_appear and (framer_appear_id or motion_id):
+            already_in_appear = bool(motion_key and motion_key in appear)
+            if not trigger_updated and not already_in_appear and motion_key:
                 target = (
                     f'[data-framer-appear-id="{framer_appear_id}"]'
                     if framer_appear_id
@@ -585,18 +587,17 @@ class SiteAnalyzer:
                 triggers.append({
                     "trigger": "mount" if framer_appear_id else "in_view",
                     "target": target,
-                    "id": framer_appear_id or motion_id,
+                    "id": motion_key,
                     "adapter": "analyzer",
                     "initial": {"opacity": 0, "y": 20},
                     "animate": {"opacity": 1, "y": 0},
                     "transition": {
-                        "duration": round(resolved_dur, 2) if resolved_dur > 0 else 0.6,
+                        "duration": round(resolved_dur, 2),
                         "type": "tween",
                         "timing_function": resolved_tf,
                         "easing": resolved_tf,
                         "ease": resolved_tf,
                     },
-                    "variants": {},
                 })
 
         for child in dom_node.get("children", []):
@@ -963,5 +964,4 @@ class SiteAnalyzer:
             return _convert(body, 0) or {"tag": "body", "children": []}
         except Exception:
             return {"tag": "body", "children": []}
-
 

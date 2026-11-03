@@ -13,6 +13,7 @@ class FramerMotionAdapter(BaseMotionAdapter):
     Extracts appear animations from Framer's hydration scripts, spring parameters,
     custom cursor tags, and parallax elements.
     """
+    name: str = "framer"
 
     def can_handle(self, html: str, css: str = "") -> bool:
         if not html:

@@ -10,6 +10,7 @@ class BaseMotionAdapter(ABC):
     Adapters parse raw HTML/CSS/script signatures and convert them into
     normalized motion metadata.
     """
+    name: str = "base"
 
     @abstractmethod
     def can_handle(self, html: str, css: str = "") -> bool:

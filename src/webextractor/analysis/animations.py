@@ -28,9 +28,21 @@ class AnimationExtractor:
             return True
         if t1_target and t2_target and t1_target == t2_target:
             return True
-        if t1_id and t2_target and (t1_id == t2_target or f'"{t1_id}"' in t2_target or f"'{t1_id}'" in t2_target or t1_id in t2_target):
-            return True
-        if t2_id and t1_target and (t2_id == t1_target or f'"{t2_id}"' in t1_target or f"'{t2_id}'" in t1_target or t2_id in t1_target):
+
+        def extract_id(sel: str) -> str | None:
+            if not sel:
+                return None
+            m = re.search(r'\[data-(?:framer-appear-id|motion-id)=["\']([^"\']+)["\']\]', sel)
+            if m:
+                return m.group(1)
+            if sel.startswith("#"):
+                return sel[1:]
+            return None
+
+        id1 = t1_id or extract_id(t1_target)
+        id2 = t2_id or extract_id(t2_target)
+
+        if id1 and id2 and id1 == id2:
             return True
         return False
 
@@ -82,7 +94,7 @@ class AnimationExtractor:
             else:
                 # Existing trigger from earlier higher-priority adapter wins
                 if not match.get("adapter"):
-                    match["adapter"] = match.get("source") or "framer"
+                    match["adapter"] = match.get("source") or match.get("adapter", adapter_name or "unknown")
                 for k, v in new_trg.items():
                     if k == "transition":
                         match.setdefault("transition", {})
@@ -114,14 +126,23 @@ class AnimationExtractor:
 
         for adapter in self.adapters:
             if adapter.can_handle(html_content, css_content):
-                adapter_name = "framer" if "framer" in adapter.__class__.__name__.lower() else (
-                    "standard" if "standard" in adapter.__class__.__name__.lower() else adapter.__class__.__name__.lower()
-                )
+                adapter_name = getattr(adapter, "name", adapter.__class__.__name__.lower())
                 res = adapter.extract_motion(html_content, css_content, claimed_targets=claimed_targets)
 
                 # Track claimed targets from this adapter
                 for app_id in res.get("appear_animations", {}):
                     claimed_targets.add(app_id)
+                    claimed_targets.add(f'[data-framer-appear-id="{app_id}"]')
+                    claimed_targets.add(f'[data-motion-id="{app_id}"]')
+                    claimed_targets.add(f"#{app_id}")
+                if html_content and res.get("appear_animations"):
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(html_content, "html.parser")
+                    for el in soup.find_all(attrs={"data-framer-appear-id": True}):
+                        aid = el.get("data-framer-appear-id")
+                        if aid in res["appear_animations"]:
+                            for c in el.get("class", []):
+                                claimed_targets.add(f".{c}")
                 for trg in res.get("motion_triggers", []):
                     if trg.get("id"):
                         claimed_targets.add(trg["id"])
@@ -133,7 +154,7 @@ class AnimationExtractor:
                 merged["appear_animations"].update(res.get("appear_animations", {}))
                 if res.get("element_transitions"):
                     for sel, t_data in res["element_transitions"].items():
-                        if not any(ct in sel for ct in claimed_targets):
+                        if sel not in claimed_targets:
                             merged["element_transitions"].setdefault(sel, t_data)
                         elif sel not in merged["element_transitions"]:
                             merged["element_transitions"][sel] = t_data

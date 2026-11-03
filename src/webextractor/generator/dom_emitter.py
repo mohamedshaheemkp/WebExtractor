@@ -445,11 +445,14 @@ class DomToJsxEmitter:
         node_id = str(node.get("id") or "")
 
         # Detect motion-governed element
+        has_framer_id = "data-framer-appear-id" in node_attrs
         motion_id = None
-        if "data-motion-id" in node_attrs:
-            motion_id = str(node_attrs["data-motion-id"])
-        elif "data-framer-appear-id" in node_attrs:
+        if has_framer_id:
             motion_id = str(node_attrs["data-framer-appear-id"])
+            if "data-motion-id" in node_attrs:
+                del node_attrs["data-motion-id"]
+        elif "data-motion-id" in node_attrs:
+            motion_id = str(node_attrs["data-motion-id"])
         elif node_id and node_id in self.motion_targets:
             motion_id = node_id
         else:
@@ -459,7 +462,7 @@ class DomToJsxEmitter:
                     break
 
         is_motion_element = motion_id is not None
-        if is_motion_element and "data-motion-id" not in node_attrs:
+        if is_motion_element and not has_framer_id and "data-motion-id" not in node_attrs:
             node_attrs["data-motion-id"] = motion_id
 
         if tag == "foreignObject":

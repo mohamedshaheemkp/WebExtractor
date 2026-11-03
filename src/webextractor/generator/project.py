@@ -1142,11 +1142,10 @@ export default function MotionRuntime({
     const defaultTimingFunction = (animations && (animations.timing_function || animations.default_timing_function || animations.default_easing)) || "cubic-bezier(0.25, 0.1, 0.25, 1)";
 
     // Track bound elements to ensure each DOM node is bound at most once
+    // Track bound elements to ensure each DOM node is bound at most once
     const boundElements = new Set<Element>();
 
-    // 1. Process Appear / Motion Configs
-    Object.entries(appearMap).forEach(([targetId, config]) => {
-      const el = findTarget(targetId);
+    const bindMotion = (el: Element, config: Record<string, any>) => {
       if (!el || boundElements.has(el)) return;
       boundElements.add(el);
 
@@ -1205,24 +1204,42 @@ export default function MotionRuntime({
       const isInView = config.trigger === "in_view" || config.inView;
       if (isInView && typeof IntersectionObserver !== "undefined") {
         const once = config.once !== false;
+        let revealed = false;
         const observer = new IntersectionObserver(
           (entries) => {
             entries.forEach((entry) => {
               if (entry.isIntersecting) {
+                revealed = true;
                 runEntranceAnimation();
                 if (once) observer.unobserve(el);
+              } else if (!once) {
+                if (htmlEl) {
+                  htmlEl.style.opacity = `${initOpacity}`;
+                  if (initTransform) {
+                    htmlEl.style.transform = initTransform;
+                  }
+                }
               }
             });
           },
           { threshold: config.threshold || 0.15 }
         );
         observer.observe(el);
-        // Fallback: ensure elements never remain permanently hidden if observer never triggers
-        const fallbackTimer = setTimeout(ensureFinalVisibleState, 3000);
+
+        // Viewport-checked safety net: only force-reveal if element intersects viewport and reveal did not fire
+        const fallbackTimer = setTimeout(() => {
+          if (!revealed && htmlEl) {
+            const rect = htmlEl.getBoundingClientRect();
+            const inViewport = rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0;
+            if (inViewport && parseFloat(window.getComputedStyle(htmlEl).opacity) < 0.99) {
+              ensureFinalVisibleState();
+            }
+          }
+        }, 3000);
+
         cleanupFns.push(() => {
           clearTimeout(fallbackTimer);
           observer.disconnect();
-          ensureFinalVisibleState();
         });
       } else {
         runEntranceAnimation();
@@ -1285,8 +1302,31 @@ export default function MotionRuntime({
           el.removeEventListener("pointercancel", onPointerUp);
         });
       }
+    };
+
+    // 1. Process Appear Configs
+    Object.entries(appearMap).forEach(([targetId, config]) => {
+      const el = findTarget(targetId);
+      if (el) bindMotion(el, config);
     });
 
+    // 1b. Process Motion Triggers (ensuring bound elements are respected)
+    triggers.forEach((trig) => {
+      const sel = trig.target || (trig.id ? `[data-motion-id="${trig.id}"], [data-framer-appear-id="${trig.id}"]` : "");
+      if (!sel) return;
+      let matchedEls: NodeListOf<Element> | Element[] = [];
+      try {
+        matchedEls = document.querySelectorAll(sel);
+      } catch {
+        const el = findTarget(trig.id || trig.target);
+        if (el) matchedEls = [el];
+      }
+      matchedEls.forEach((node) => {
+        if (node instanceof HTMLElement) {
+          bindMotion(node, trig);
+        }
+      });
+    });
     // 2. Parallax / Scroll-Linked Elements
     const parallaxElements: HTMLElement[] = [];
     parallaxList.forEach((sel) => {
@@ -3078,4 +3118,3 @@ export const toolkit: ToolkitSkill[] = """
                 indent=2,
             ),
         )
-
