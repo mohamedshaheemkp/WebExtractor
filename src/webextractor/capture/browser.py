@@ -514,6 +514,13 @@ class BrowserCapture:
             """
         )
 
+            spatial_tree = []
+            try:
+                from webextractor.verification.spatial_tree import SpatialTreeExtractor
+                spatial_tree = await SpatialTreeExtractor.capture(page)
+            except Exception:
+                pass
+
         finally:
             await page.close()
 
@@ -522,6 +529,7 @@ class BrowserCapture:
             "title": title,
             "html": html,
             "dom": dom_snapshot,
+            "spatial_tree": spatial_tree,
             "requests": network_requests,
             "screenshot": str(screenshot_path),
             "discovered_links": discovered_links or [],

@@ -45,6 +45,9 @@ class WebsiteCrawler:
         self.include_patterns = include_patterns or []
         self.exclude_patterns = exclude_patterns or []
         self.viewports = viewports
+        self.page = None
+        self.browser = None
+        self.spatial_tree = []
 
     def normalize_route(self, raw_url: str, base_url: str) -> tuple[str, str] | None:
         """
@@ -215,6 +218,8 @@ class WebsiteCrawler:
                 primary_capture,
             )
 
+            primary_capture["spatial_tree"] = primary_capture.get("spatial_tree") or (captured_pages[0].get("spatial_tree", []) if captured_pages else [])
+            self.spatial_tree = primary_capture["spatial_tree"]
             primary_capture["snapshot_dir"] = str(
                 snapshot_dir
             )

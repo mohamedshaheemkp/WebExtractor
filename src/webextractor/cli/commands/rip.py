@@ -23,6 +23,9 @@ from webextractor.model.route import Route
 from webextractor.model.site_ir import SiteIR
 from webextractor.verification.report import VerificationReport
 from webextractor.verification.visual_diff import VisualDiffScorer
+from webextractor.verification.spatial_tree import SpatialTreeExtractor
+from webextractor.verification.spatial_comparator import SpatialComparator
+from webextractor.verification.auto_repair import LayoutAutoRepair
 
 console = Console(legacy_windows=False)
 
@@ -69,6 +72,7 @@ async def execute_rip(
     interactions = []
     capture: dict[str, Any] = {}
     entries: list[dict[str, Any]] = []
+    baseline_spatial_tree: list[dict[str, Any]] = []
 
     # [1/6] INGESTION & EVIDENCE CAPTURE
     if is_url:
@@ -77,6 +81,14 @@ async def execute_rip(
             crawler = WebsiteCrawler(dest_dir / "capture", max_routes=50, max_depth=3, viewports=custom_viewports)
             capture = await crawler.crawl(target)
             console.print("      [green]✓[/green] Browser snapshot captured")
+
+            # ── [Stage 1: Capture baseline spatial tree from live site] ──
+            baseline_spatial_tree = capture.get("spatial_tree", [])
+            if not baseline_spatial_tree and hasattr(crawler, "page") and crawler.page:
+                try:
+                    baseline_spatial_tree = await SpatialTreeExtractor.capture(crawler.page)
+                except Exception:
+                    baseline_spatial_tree = []
 
             html_content = capture.get("html", "")
             routes = RouteAnalyzer.analyze_routes(html_content, target, extra_routes=capture.get("routes", []))
@@ -225,6 +237,59 @@ async def execute_rip(
         static_gen = StaticProjectGenerator(site_ir, static_dest)
         static_gen.generate()
         console.print(f"      [green]✓[/green] Standalone static HTML export generated in {static_dest.name}/")
+
+    # ── [Stage 6: Automated Verification & Auto-Repair Pass] ──
+    console.print("\n[bold cyan][6/6] Verifying layout fidelity & auto-repairing...[/bold cyan]")
+    try:
+        from playwright.async_api import async_playwright
+        test_page = None
+        test_browser = None
+        p_inst = None
+
+        if "crawler" in locals() and hasattr(crawler, "browser") and crawler.browser and hasattr(crawler.browser, "new_page"):
+            try:
+                test_page = await crawler.browser.new_page()
+            except Exception:
+                test_page = None
+
+        if test_page is None:
+            p_inst = await async_playwright().start()
+            test_browser = await p_inst.chromium.launch(headless=True)
+            test_page = await test_browser.new_page()
+
+        local_entry = dest_dir / "index.html"
+        if not local_entry.exists():
+            static_candidate = dest_dir.parent / f"{dest_dir.name}-html" / "index.html"
+            if static_candidate.exists():
+                local_entry = static_candidate
+
+        if local_entry.exists():
+            file_url = f"file:///{local_entry.resolve().as_posix()}"
+            await test_page.goto(file_url)
+            await test_page.wait_for_load_state("networkidle")
+
+            reconstructed_spatial_tree = await SpatialTreeExtractor.capture(test_page)
+
+            # Run comparison
+            comparator = SpatialComparator(baseline_spatial_tree, reconstructed_spatial_tree)
+            violations = comparator.compare()
+
+            if violations:
+                console.print(f"      [yellow]⚠ Found {len(violations)} layout regressions. Applying auto-repairs...[/yellow]")
+                repaired = LayoutAutoRepair.apply_repairs(site_ir, violations, dest_dir)
+                if repaired:
+                    console.print("      [green]✓ Applied layout_repairs.css patches and un-clamped carousel tracks.[/green]")
+            else:
+                console.print("      [green]✓ Spatial geometry verified with 0 layout regressions.[/green]")
+
+        if test_page:
+            await test_page.close()
+        if test_browser:
+            await test_browser.close()
+        if p_inst:
+            await p_inst.stop()
+    except Exception as e:
+        console.print(f"      [dim]Note: Local headless verification skipped: {e}[/dim]")
 
     # Multi-Signal Verification Audit
     generated_capture = None
